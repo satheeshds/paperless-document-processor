@@ -1,0 +1,30 @@
+# Go build artifacts
+*.exe
+processing-service
+server
+server.test
+cmd/server/server.exe
+
+# Database
+duck.db
+duck.db.log
+duck.db.wal
+
+# Environment
+.env
+
+# Temporary/Processing Files
+document_*.json
+*_tika.html
+*_tika.json
+
+# User specific folders
+paperless-gpt/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store

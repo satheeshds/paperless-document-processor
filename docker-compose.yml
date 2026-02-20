@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  processor:
+    image: satheeshds/paperless-document-processor
+    build: .
+    container_name: paperless-ai-processor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DB_PATH=/app/data/duck.db
+      # Pass these from .env file or host environment
+      - PAPERLESS_URL=${PAPERLESS_URL}
+      - PAPERLESS_TOKEN=${PAPERLESS_TOKEN}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}
+      - DOCUMENT_AI_PROCESSOR_ID=${DOCUMENT_AI_PROCESSOR_ID}
+      # If using key file:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/config/service-account.json
+      # Accounting (optional)
+      - ACCOUNTING_URL=${ACCOUNTING_URL}
+      - ACCOUNTING_USER=${ACCOUNTING_USER}
+      - ACCOUNTING_PASS=${ACCOUNTING_PASS}
+    volumes:
+      - ./data:/app/data
+      - /path/to/paperless/media:/app/media:ro
+      # Mount the service account key
+      - ./service-account.json:/app/config/service-account.json:ro

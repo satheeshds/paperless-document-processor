@@ -1,0 +1,15 @@
+{
+    "platforms": {
+        "Swiggy": {
+            "header": true,
+            "sheet": "Order Level",
+            "range": "A3:AR",
+            "stop_at_empty": true
+        },
+        "Zomato": {
+            "header": true,
+            "sheet": "Payout Breakup",
+            "all_varchar": true
+        }
+    }
+}
