@@ -7,6 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"paperless-document-processor/config"
+	"paperless-document-processor/pkg/accounting"
+	"paperless-document-processor/pkg/excel"
+
+	"github.com/duckdb/duckdb-go/v2"
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
@@ -117,68 +122,125 @@ func (d *DB) SaveDocument(doc *ProcessedDocument) error {
 	return nil
 }
 
+func (d *DB) IsDocumentProcessed(docID int) (bool, error) {
+	query := `SELECT COUNT(1) FROM processed_documents WHERE paperless_id = ?;`
+	slog.Debug("Executing check statement", "query", query, "docID", docID)
+	var count int
+	if err := d.Conn.QueryRow(query, docID).Scan(&count); err != nil {
+		return false, fmt.Errorf("failed to check document: %w", err)
+	}
+	return count > 0, nil
+}
+
 func (d *DB) Close() error {
 	return d.Conn.Close()
 }
 
-// ReadExcel reads an Excel file using DuckDB's read_xlsx function and prints the output.
-func (d *DB) ReadExcel(filePath string, options map[string]interface{}) error {
-	slog.Info("Reading Excel file via DuckDB", "path", filePath, "options", options)
+// ProcessPlatformExcel reads an Excel file using DuckDB and stores it into a platform-specific table.
+func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, options config.PlatformConfig) error {
+	slog.Info("Storing Excel file via DuckDB into platform table", "platform", platform, "path", filePath)
 
-	optionStr := ""
-	if len(options) > 0 {
-		for k, v := range options {
-			var valStr string
-			switch t := v.(type) {
-			case string:
-				valStr = fmt.Sprintf("'%s'", t)
-			case bool:
-				valStr = fmt.Sprintf("%v", t)
-			default:
-				valStr = fmt.Sprintf("%v", v)
+	for _, importConfig := range options.ImportConfigs {
+
+		if importConfig.RelativeRange.RelativeConfigIndex > 0 {
+			relativeOption := options.ImportConfigs[importConfig.RelativeRange.RelativeConfigIndex]
+			relativeRangeEnd, err := d.GetRangeEnd(docID, platform, relativeOption)
+			if err != nil {
+				return fmt.Errorf("failed to get relative range end: %w", err)
 			}
-			if optionStr == "" {
-				optionStr = fmt.Sprintf(", %s=%s", k, valStr)
-			} else {
-				optionStr += fmt.Sprintf(", %s=%s", k, valStr)
+			currentRange, err := excel.NewRange(relativeOption.Range)
+			if err != nil {
+				return fmt.Errorf("failed to create current range: %w", err)
+			}
+			currentRange.Start.Row = relativeRangeEnd.End.Row + importConfig.RelativeRange.RowsOffset
+			importConfig.Range = currentRange.String()
+		}
+
+		optionStr := importConfig.ToOptionString()
+
+		tableName := importConfig.GetTableName(platform)
+
+		// 1. Create table if not exists
+		createStmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s AS SELECT %d as document_id, * FROM read_xlsx('%s', %s) LIMIT 0;`, tableName, docID, filePath, optionStr)
+		slog.Debug("Executing create table statement", "query", createStmt)
+		if _, err := d.Conn.Exec(createStmt); err != nil {
+			return fmt.Errorf("failed to create platform table: %w", err)
+		}
+
+		// 3. Insert data (using BY NAME safely gracefully handles varying schema if supported, and normally duckdb ignores missing columns)
+		insertStmt := fmt.Sprintf(`INSERT INTO %s BY NAME SELECT %d as document_id, * FROM read_xlsx('%s', %s);`, tableName, docID, filePath, optionStr)
+		slog.Debug("Executing insert statement", "query", insertStmt)
+		if _, err := d.Conn.Exec(insertStmt); err != nil {
+			// Fallback to normal insert if BY NAME fails for older DuckDB versions
+			fallbackStmt := fmt.Sprintf(`INSERT INTO %s SELECT %d as document_id, * FROM read_xlsx('%s', %s);`, tableName, docID, filePath, optionStr)
+			if _, err2 := d.Conn.Exec(fallbackStmt); err2 != nil {
+				return fmt.Errorf("failed to insert excel data: %w (fallback error: %v)", err, err2)
 			}
 		}
+		slog.Info("Successfully stored Excel data into", "table", tableName)
+
 	}
 
-	query := fmt.Sprintf("SELECT * FROM read_xlsx('%s'%s)", filePath, optionStr)
-	slog.Debug("Executing Excel read query", "query", query)
-
-	rows, err := d.Conn.Query(query)
-	if err != nil {
-		slog.Error("Failed to query Excel file", "error", err)
-		return fmt.Errorf("failed to query excel: %w", err)
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Excel Content (%s):\n", filePath)
-	fmt.Println(cols)
-
-	count := 0
-	for rows.Next() {
-		columns := make([]interface{}, len(cols))
-		columnPointers := make([]interface{}, len(cols))
-		for i := range columns {
-			columnPointers[i] = &columns[i]
-		}
-
-		if err := rows.Scan(columnPointers...); err != nil {
-			return err
-		}
-
-		fmt.Println(columns)
-		count++
-	}
-
-	slog.Info("Successfully read Excel file", "rows", count)
 	return nil
+}
+
+func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig) (excel.Range, error) {
+	rangeStart := option.Range
+	rangeStartObj, err := excel.NewRange(rangeStart)
+	if err != nil {
+		return excel.Range{}, fmt.Errorf("failed to parse range: %w", err)
+	}
+	if rangeStartObj.End.Row > 0 {
+		return rangeStartObj, nil
+	}
+
+	if rangeStart != "" {
+		var rowCount int
+		query := fmt.Sprintf("SELECT COUNT(1) FROM %s WHERE document_id = ?", option.GetTableName(platform))
+		slog.Debug("Executing query to get range end", "query", query, "docID", docID)
+		rows := d.Conn.QueryRow(query, docID)
+		if rows.Err() != nil {
+			return excel.Range{}, fmt.Errorf("failed to query platform table: %w", rows.Err())
+		}
+		rows.Scan(&rowCount)
+
+		if !option.Header {
+			rowCount--
+		}
+
+		lastCell := excel.Cell{
+			Row:    rangeStartObj.Start.Row + rowCount,
+			Column: rangeStartObj.End.Column,
+		}
+		rangeEndObj := excel.Range{
+			Start: rangeStartObj.Start,
+			End:   lastCell,
+		}
+		slog.Debug("Retrieved range end", "rangeEnd", rangeEndObj)
+		return rangeEndObj, nil
+	}
+	return excel.Range{}, nil
+}
+
+// GetPlatformExcelRows retrieves the previously stored Excel rows from the platform table.
+func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (accounting.PayoutInput, error) {
+	var payoutInput duckdb.Composite[accounting.PayoutInput]
+	for _, exportConfig := range options.ExportConfigs {
+		if exportConfig.ReaderConfigs == nil || len(exportConfig.ReaderConfigs) == 0 {
+			continue
+		}
+		var jsonMap duckdb.Composite[map[string]interface{}]
+		tableName := exportConfig.GetTableName(platform)
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE document_id = ?", exportConfig.ToSelectExpresssions(), tableName)
+		slog.Debug("Executing query to get platform table", "query", query, "docID", docID)
+		rows := d.Conn.QueryRow(query, docID)
+		if rows.Err() != nil {
+			return accounting.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", rows.Err())
+		}
+		rows.Scan(&jsonMap)
+		slog.Debug("Retrieved platform table", "rows", jsonMap.Get())
+		payoutInput.Scan(jsonMap.Get())
+	}
+	slog.Debug("Constructed payout input", "rows", payoutInput.Get())
+	return payoutInput.Get(), nil
 }

@@ -1,15 +1,87 @@
 {
     "platforms": {
-        "Swiggy": {
-            "header": true,
-            "sheet": "Order Level",
-            "range": "A3:AR",
-            "stop_at_empty": true
+        "swiggy": {
+            "import_configs": [
+                {
+                    "header": true,
+                    "table_name": "swiggy_order_level",
+                    "sheet": "Order Level",
+                    "range": "A3:AR",
+                    "stop_at_empty": true
+                },
+                {
+                    "table_name": "swiggy_other_charges_and_deductions",
+                    "header": true,
+                    "sheet": "Other charges and deductions",
+                    "range": "A5:H",
+                    "stop_at_empty": true
+                },
+                {
+                    "table_name": "swiggy_other_charges_and_deductions",
+                    "header": true,
+                    "sheet": "Other charges and deductions",
+                    "relative_range": {
+                        "relative_config_index": 1,
+                        "rows_offset": 2
+                    },
+                    "stop_at_empty": true
+                }
+            ],
+            "export_configs": [
+                {
+                    "table_name": "swiggy_order_level",
+                    "reader_configs": [
+                        {
+                            "column_name": "PeriodStart",
+                            "expression": "MIN(#4)"
+                        },
+                        {
+                            "column_name": "PeriodEnd",
+                            "expression": "MAX(#4)"
+                        },
+                        {
+                            "column_name": "TotalOrders",
+                            "expression": "COUNT(1)"
+                        },
+                        {
+                            "column_name": "GrossSalesAmt",
+                            "expression": "SUM(#15)"
+                        },
+                        {
+                            "column_name": "RestaurantDiscountAmt",
+                            "expression": "SUM(#12)"
+                        },
+                        {
+                            "column_name": "PlatformCommissionAmt",
+                            "expression": "SUM(#31)"
+                        },
+                        {
+                            "column_name": "TaxesTcsTdsAmt",
+                            "expression": "SUM(#38)"
+                        },
+                        {
+                            "column_name": "FinalPayoutAmt",
+                            "expression": "SUM(#39)"
+                        }
+                    ]
+                },
+                {
+                    "table_name": "swiggy_other_charges_and_deductions",
+                    "reader_configs": [
+                        {
+                            "column_name": "MarketingAdsAmt",
+                            "expression": "SUM(#4)"
+                        }
+                    ]
+                }
+            ]
         },
-        "Zomato": {
-            "header": true,
-            "sheet": "Payout Breakup",
-            "all_varchar": true
-        }
+        "zomato": [
+            {
+                "header": true,
+                "sheet": "Payout Breakup",
+                "all_varchar": true
+            }
+        ]
     }
 }

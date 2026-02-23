@@ -48,41 +48,48 @@ type BillInput struct {
 	Notes      string `json:"notes,omitempty"`
 }
 
+type Platform string
+
+const (
+	PlatformSwiggy Platform = "swiggy"
+	PlatformZomato Platform = "zomato"
+)
+
 type Payout struct {
-	ID                    int     `json:"id"`
-	OutletName            string  `json:"outlet_name"`
-	Platform              string  `json:"platform"`
-	PeriodStart           *string `json:"period_start"`
-	PeriodEnd             *string `json:"period_end"`
-	SettlementDate        *string `json:"settlement_date"`
-	TotalOrders           int     `json:"total_orders"`
-	GrossSalesAmt         int     `json:"gross_sales_amt"`
-	RestaurantDiscountAmt int     `json:"restaurant_discount_amt"`
-	PlatformCommissionAmt int     `json:"platform_commission_amt"`
-	TaxesTcsTdsAmt        int     `json:"taxes_tcs_tds_amt"`
-	MarketingAdsAmt       int     `json:"marketing_ads_amt"`
-	FinalPayoutAmt        int     `json:"final_payout_amt"`
-	UtrNumber             string  `json:"utr_number"`
+	ID                    int      `json:"id"`
+	OutletName            string   `json:"outlet_name"`
+	Platform              Platform `json:"platform"`
+	PeriodStart           string   `json:"period_start"`
+	PeriodEnd             string   `json:"period_end"`
+	SettlementDate        string   `json:"settlement_date"`
+	TotalOrders           int      `json:"total_orders"`
+	GrossSalesAmt         float32  `json:"gross_sales_amt"`
+	RestaurantDiscountAmt float32  `json:"restaurant_discount_amt"`
+	PlatformCommissionAmt float32  `json:"platform_commission_amt"`
+	TaxesTcsTdsAmt        float32  `json:"taxes_tcs_tds_amt"`
+	MarketingAdsAmt       float32  `json:"marketing_ads_amt"`
+	FinalPayoutAmt        float32  `json:"final_payout_amt"`
+	UtrNumber             string   `json:"utr_number"`
 }
 
 type PayoutInput struct {
-	OutletName            string  `json:"outlet_name"`
-	Platform              string  `json:"platform"`
-	PeriodStart           *string `json:"period_start"`
-	PeriodEnd             *string `json:"period_end"`
-	SettlementDate        *string `json:"settlement_date"`
-	TotalOrders           int     `json:"total_orders"`
-	GrossSalesAmt         int     `json:"gross_sales_amt"`
-	RestaurantDiscountAmt int     `json:"restaurant_discount_amt"`
-	PlatformCommissionAmt int     `json:"platform_commission_amt"`
-	TaxesTcsTdsAmt        int     `json:"taxes_tcs_tds_amt"`
-	MarketingAdsAmt       int     `json:"marketing_ads_amt"`
-	FinalPayoutAmt        int     `json:"final_payout_amt"`
-	UtrNumber             string  `json:"utr_number"`
+	OutletName            string   `json:"outlet_name"`
+	Platform              Platform `json:"platform"`
+	PeriodStart           string   `json:"period_start"`
+	PeriodEnd             string   `json:"period_end"`
+	SettlementDate        string   `json:"settlement_date"`
+	TotalOrders           int      `json:"total_orders"`
+	GrossSalesAmt         float32  `json:"gross_sales_amt"`
+	RestaurantDiscountAmt float32  `json:"restaurant_discount_amt"`
+	PlatformCommissionAmt float32  `json:"platform_commission_amt"`
+	TaxesTcsTdsAmt        float32  `json:"taxes_tcs_tds_amt"`
+	MarketingAdsAmt       float32  `json:"marketing_ads_amt"`
+	FinalPayoutAmt        float32  `json:"final_payout_amt"`
+	UtrNumber             string   `json:"utr_number"`
 }
 
 func (p PayoutInput) String() string {
-	return fmt.Sprintf("PayoutInput{OutletName: %s, Platform: %s, PeriodStart: %s, PeriodEnd: %s, SettlementDate: %s, TotalOrders: %d, GrossSalesAmt: %d, RestaurantDiscountAmt: %d, PlatformCommissionAmt: %d, TaxesTcsTdsAmt: %d, MarketingAdsAmt: %d, FinalPayoutAmt: %d, UtrNumber: %s}", p.OutletName, p.Platform, p.PeriodStart, p.PeriodEnd, p.SettlementDate, p.TotalOrders, p.GrossSalesAmt, p.RestaurantDiscountAmt, p.PlatformCommissionAmt, p.TaxesTcsTdsAmt, p.MarketingAdsAmt, p.FinalPayoutAmt, p.UtrNumber)
+	return fmt.Sprintf("PayoutInput{OutletName: %v, Platform: %v, PeriodStart: %v, PeriodEnd: %v, SettlementDate: %v, TotalOrders: %v, GrossSalesAmt: %v, RestaurantDiscountAmt: %v, PlatformCommissionAmt: %v, TaxesTcsTdsAmt: %v, MarketingAdsAmt: %v, FinalPayoutAmt: %v, UtrNumber: %v}", p.OutletName, string(p.Platform), p.PeriodStart, p.PeriodEnd, p.SettlementDate, p.TotalOrders, p.GrossSalesAmt, p.RestaurantDiscountAmt, p.PlatformCommissionAmt, p.TaxesTcsTdsAmt, p.MarketingAdsAmt, p.FinalPayoutAmt, p.UtrNumber)
 }
 
 type Response[T any] struct {

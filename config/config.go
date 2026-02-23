@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -82,4 +83,86 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+type PayoutConfigs struct {
+	Platforms map[string]PlatformConfig `json:"platforms"`
+}
+
+type PlatformConfig struct {
+	ImportConfigs []ImportConfig `json:"import_configs,omitempty"`
+	ExportConfigs []ExportConfig `json:"export_configs,omitempty"`
+}
+
+type ImportConfig struct {
+	TableName     string        `json:"table_name,omitempty"`
+	Sheet         string        `json:"sheet,omitempty"`
+	Range         string        `json:"range,omitempty"`
+	RelativeRange RelativeRange `json:"relative_range,omitempty"`
+	Header        bool          `json:"header,omitempty"`
+	StopAtEmpty   bool          `json:"stop_at_empty,omitempty"`
+	AllVarchar    bool          `json:"all_varchar,omitempty"`
+}
+
+type ExportConfig struct {
+	TableName     string             `json:"table_name,omitempty"`
+	ReaderConfigs []DataReaderConfig `json:"reader_configs,omitempty"`
+}
+
+type RelativeRange struct {
+	RelativeConfigIndex int `json:"relative_config_index,omitempty"`
+	RowsOffset          int `json:"rows_offset,omitempty"`
+}
+
+type DataReaderConfig struct {
+	ColumnName string `json:"column_name"`
+	Expression string `json:"expression"`
+}
+
+func (p PlatformConfig) String() string {
+	return fmt.Sprintf("PlatformConfig{ImportConfigs: %v, ExportConfigs: %v}", p.ImportConfigs, p.ExportConfigs)
+}
+
+func (p ImportConfig) ToOptionString() string {
+	var options string
+
+	if p.Header {
+		options += "header=true,"
+	}
+	if p.StopAtEmpty {
+		options += "stop_at_empty=true,"
+	}
+	if p.AllVarchar {
+		options += "all_varchar=true,"
+	}
+	if p.Sheet != "" {
+		options += fmt.Sprintf("sheet='%s',", p.Sheet)
+	}
+	if p.Range != "" {
+		options += fmt.Sprintf("range='%s'", p.Range)
+	}
+	return options
+}
+
+func (p ExportConfig) ToSelectExpresssions() string {
+	var expressions string
+	for _, readerConfig := range p.ReaderConfigs {
+		if expressions == "" {
+			expressions = fmt.Sprintf("%s: %s", readerConfig.ColumnName, readerConfig.Expression)
+		} else {
+			expressions += fmt.Sprintf(", %s: %s", readerConfig.ColumnName, readerConfig.Expression)
+		}
+	}
+	return fmt.Sprintf("{ %s }", expressions)
+}
+
+func (p ImportConfig) GetTableName(platform string) string {
+	if p.TableName != "" {
+		return p.TableName
+	}
+	return fmt.Sprintf("payout_%s_%s_%s", strings.ToLower(platform), strings.ReplaceAll(p.Sheet, " ", "_"), strings.ReplaceAll(p.Range, ":", "_"))
+}
+
+func (p ExportConfig) GetTableName(platform string) string {
+	return p.TableName
 }
