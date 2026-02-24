@@ -1,9 +1,6 @@
 # Go build artifacts
 *.exe
 processing-service
-server
-server.test
-cmd/server/server.exe
 
 # Database
 duck.db
