@@ -41,6 +41,10 @@ type PayoutRequest struct {
 	DocURL string `json:"doc_url"`
 }
 
+type BankStatementRequest struct {
+	DocURL string `json:"doc_url"`
+}
+
 func main() {
 	// 1. Load Config
 	cfg, err := config.Load()
@@ -173,6 +177,7 @@ func main() {
 	// 6. Start Server
 	http.HandleFunc("POST /bills", srv.handleBills)
 	http.HandleFunc("POST /payouts", srv.handlePayouts)
+	http.HandleFunc("POST /bank-statements", srv.handleBankStatements)
 	slog.Info("Starting server", "port", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, nil); err != nil {
 		slog.Error("Server failed", "error", err)
@@ -237,7 +242,7 @@ func (s *Server) processBill(docID int, req BillRequest) {
 	slog.Info("Detected MIME type", "document_id", docID, "mimetype", mimeType, "extension", mtype.Extension())
 
 	slog.Info("Sending to Document AI", "document_id", docID, "mime_type", mimeType)
-	aiDoc, err := s.docAIClient.ProcessDocument(context.Background(), content, mimeType)
+	aiDoc, err := s.docAIClient.ProcessDocument(context.Background(), "", content, mimeType)
 	if err != nil {
 		slog.Error("DocAI error", "document_id", docID, "error", err)
 		return
@@ -545,40 +550,173 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 
 		slog.Info("Local accounting payout created from Excel", "document_id", docID, "payout_id", payoutID)
 	} else {
-		// 2. Download Content
-		// content, err := s.paperlessClient.DownloadDocument(docID, true)
-		// if err != nil {
-		// 	slog.Error("Error downloading payout content", "document_id", docID, "error", err)
-		// 	return
-		// }
-
-		// 3. Process with Tika
-		// slog.Info("Sending to Tika for parsing", "document_id", docID)
-		// text, err := s.tikaClient.Parse(content)
-		// if err != nil {
-		// 	slog.Error("Tika error", "document_id", docID, "error", err)
-		// 	return
-		// }
-
-		// // 4. Extract Data
-		// // payoutInput := s.extractPayoutData(text)
-		// if payoutInput.Platform == "" && platform != "" {
-		// 	payoutInput.Platform = accounting.Platform(platform)
-		// }
-		// if payoutInput.UtrNumber == "" {
-		// 	payoutInput.UtrNumber = doc.OriginalFileName // Fallback
-		// }
-		// slog.Debug("Extracted payout data via Tika", "document_id", docID, "payout_input", payoutInput.String())
-
-		// // 5. Send to Accounting
-		// payoutID, err := s.accountingClient.CreatePayout(payoutInput)
-		// if err != nil {
-		// 	slog.Error("Accounting payout creation failed via Tika", "document_id", docID, "error", err)
-		// 	return
-		// }
-
-		// slog.Info("Local accounting payout created via Tika", "document_id", docID, "payout_id", payoutID)
+		// Payout with generic document (TIKA or DocAI)
+		// ... existing implementation if any ...
 	}
+}
+
+func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
+	if s.accountingClient == nil {
+		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req BankStatementRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		slog.Error("Failed to decode bank statement request", "error", err)
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// Extract ID from URL
+	trimmed := strings.TrimSuffix(req.DocURL, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) == 0 {
+		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
+		return
+	}
+	idStr := parts[len(parts)-1]
+	docID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
+
+	go s.processBankStatement(docID, req)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Bank statement processing started"))
+}
+
+func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
+	slog.Info("Starting bank statement processing", "document_id", docID)
+
+	// 1. Get Metadata & Content
+	content, err := s.paperlessClient.DownloadDocument(docID, false)
+	if err != nil {
+		slog.Error("Error downloading bank statement", "document_id", docID, "error", err)
+		return
+	}
+
+	mtype := mimetype.Detect(content)
+	mimeType := mtype.String()
+
+	// 2. Load Schema Config
+	schema := make(map[string]string)
+	if s.cfg.BankStatementConfigPath != "" {
+		data, err := os.ReadFile(s.cfg.BankStatementConfigPath)
+		if err != nil {
+			slog.Error("Failed to read bank statement config", "path", s.cfg.BankStatementConfigPath, "error", err)
+		} else {
+			if err := json.Unmarshal(data, &schema); err != nil {
+				slog.Error("Failed to parse bank statement config", "error", err)
+			}
+		}
+	}
+
+	// 3. Process with DocAI (using BankStatementProcessorID)
+	aiDoc, err := s.docAIClient.ProcessDocument(context.Background(), s.cfg.BankStatementProcessorID, content, mimeType)
+	if err != nil {
+		slog.Error("DocAI bank statement error", "document_id", docID, "error", err)
+		return
+	}
+
+	// 3a. Save to processed documents
+	// 4. Save to DB
+	// Serialize Extracted + Full Response?
+	// We'll just save the extracted for now + raw JSON if we had it (aiDoc is protobuf)
+	// For "raw_ocr_data", we can marshal aiDoc to JSON.
+	rawJSON, _ := json.Marshal(aiDoc.Entities)
+
+	// totalAmount, _ := strconv.ParseFloat(extracted.TotalAmount, 64) // weak parsing, clean up usually needed (remove currency symbols)
+
+	doc := &storage.ProcessedDocument{
+		PaperlessID: docID,
+		Filename:    req.DocURL,
+		// Supplier:      extracted.Supplier,
+		// Date:          extracted.ExampleDate,
+		// TotalAmount:   totalAmount,
+		RawOCRData:    string(rawJSON),
+		ExtractedText: aiDoc.Text,
+	}
+
+	err = s.db.SaveDocument(doc)
+	if err != nil {
+		slog.Error("Failed to save document", "document_id", docID, "error", err)
+		return
+	}
+
+	// 4. Extract Transactions
+	transactions := s.docAIClient.ExtractBankStatementData(aiDoc, schema)
+	slog.Info("Extracted transactions", "document_id", docID, "count", len(transactions))
+
+	// 5. Send to Accounting
+	if s.accountingClient != nil && len(transactions) > 0 {
+		// Resolve bank name from DocAI top-level entities (type = "bank_name")
+		bankName := "Bank"
+		for _, entity := range aiDoc.Entities {
+			if entity.Type == "bank_name" {
+				v := entity.MentionText
+				if entity.NormalizedValue != nil && entity.NormalizedValue.Text != "" {
+					v = entity.NormalizedValue.Text
+				}
+				if v != "" {
+					bankName = v
+					break
+				}
+			}
+		}
+		slog.Info("Resolved bank name from DocAI", "bank_name", bankName)
+
+		bankAccountID, err := s.accountingClient.GetOrCreateBankAccount(bankName)
+		if err != nil {
+			slog.Error("Failed to get/create bank account", "document_id", docID, "bank_name", bankName, "error", err)
+			// Continue without accounting — don't abort
+		} else {
+			for _, txMap := range transactions {
+				amount, _ := strconv.ParseFloat(txMap["amount"], 64)
+
+				// Map debit → expense, credit → income (accounting service expects income/expense)
+				txType := "expense"
+				if txMap["type"] == "credit" {
+					txType = "income"
+				}
+
+				date := txMap["date"]
+				if date == "" {
+					date = time.Now().Format("2006-01-02")
+				}
+				desc := txMap["description"]
+
+				txnInput := accounting.TransactionInput{
+					AccountID:       bankAccountID,
+					Type:            txType,
+					Amount:          amount,
+					TransactionDate: &date,
+					Description:     &desc,
+				}
+
+				txID, err := s.accountingClient.CreateTransaction(txnInput)
+				if err != nil {
+					slog.Error("Failed to create transaction", "document_id", docID, "error", err, "date", date, "amount", amount, "type", txType)
+					continue
+				}
+				slog.Info("Transaction created", "document_id", docID, "transaction_id", txID, "type", txType, "amount", amount)
+			}
+		}
+	}
+
+	// 6. Update Paperless
+	updates := paperless.DocumentUpdate{
+		Content: &aiDoc.Text,
+	}
+	if err := s.paperlessClient.UpdateDocument(docID, updates); err != nil {
+		slog.Warn("Failed to update paperless document content", "document_id", docID, "error", err)
+	}
+
+	slog.Info("Finished processing bank statement", "document_id", docID)
 }
 
 func (s *Server) parseAmount(val string) int {

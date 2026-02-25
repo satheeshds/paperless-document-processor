@@ -9,16 +9,18 @@ import (
 )
 
 type Config struct {
-	Port                  string
-	DBPath                string
-	PaperlessURL          string
-	PaperlessToken        string
-	GoogleProjectID       string
-	GoogleLocation        string
-	DocumentAIProcessorID string
-	GoogleCredentialsPath string // Optional
-	LogLevel              string
-	PayoutConfigPath      string // JSON file for platform options
+	Port                     string
+	DBPath                   string
+	PaperlessURL             string
+	PaperlessToken           string
+	GoogleProjectID          string
+	GoogleLocation           string
+	DocumentAIProcessorID    string
+	GoogleCredentialsPath    string // Optional
+	LogLevel                 string
+	PayoutConfigPath         string // JSON file for platform options
+	BankStatementProcessorID string
+	BankStatementConfigPath  string // JSON file for bank statement schema mapping
 
 	// Accounting (optional)
 	AccountingURL  string
@@ -50,6 +52,9 @@ func Load() (*Config, error) {
 
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),
+
+		BankStatementProcessorID: os.Getenv("BANK_STATEMENT_PROCESSOR_ID"),
+		BankStatementConfigPath:  os.Getenv("BANK_STATEMENT_CONFIG_PATH"),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -74,6 +79,9 @@ func (c *Config) validate() error {
 	}
 	if c.DocumentAIProcessorID == "" {
 		return fmt.Errorf("DOCUMENT_AI_PROCESSOR_ID is required")
+	}
+	if c.BankStatementProcessorID == "" {
+		return fmt.Errorf("BANK_STATEMENT_PROCESSOR_ID is required")
 	}
 	return nil
 }

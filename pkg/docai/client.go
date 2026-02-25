@@ -54,13 +54,18 @@ func NewClient(ctx context.Context, projectID, location, processorID, credential
 	}, nil
 }
 
-func (c *Client) ProcessDocument(ctx context.Context, fileContent []byte, mimeType string) (*documentaipb.Document, error) {
+func (c *Client) ProcessDocument(ctx context.Context, processorID string, fileContent []byte, mimeType string) (*documentaipb.Document, error) {
 	if len(fileContent) == 0 {
 		slog.Error("Document AI: attempt to process empty file content")
 		return nil, fmt.Errorf("file content is empty")
 	}
 
-	name := fmt.Sprintf("projects/%s/locations/%s/processors/%s", c.projectID, c.location, c.processorID)
+	pID := processorID
+	if pID == "" {
+		pID = c.processorID
+	}
+
+	name := fmt.Sprintf("projects/%s/locations/%s/processors/%s", c.projectID, c.location, pID)
 	slog.Debug("Preparing Document AI request", "resource_name", name, "mime_type", mimeType, "content_size", len(fileContent))
 
 	req := &documentaipb.ProcessRequest{
@@ -85,6 +90,85 @@ func (c *Client) ProcessDocument(ctx context.Context, fileContent []byte, mimeTy
 
 	slog.Info("Document AI processing completed successfully")
 	return resp.Document, nil
+}
+
+func (c *Client) ExtractBankStatementData(doc *documentaipb.Document, schema map[string]string) []map[string]string {
+	var transactions []map[string]string
+
+	// The bank statement processor returns "table_item" entities, each with sub-properties:
+	//   transaction_withdrawal_date / transaction_deposit_date  → date
+	//   transaction_withdrawal / transaction_deposit            → amount
+	//   transaction_withdrawal_description / transaction_deposit_description → description
+	// Normalized values (ISO dates, numeric amounts) are preferred over mention_text.
+	for _, entity := range doc.Entities {
+		if entity.Type != "table_item" {
+			continue
+		}
+
+		tx := make(map[string]string)
+		txType := "" // "debit" or "credit"
+
+		for _, prop := range entity.Properties {
+			pType := prop.Type
+
+			// Prefer normalized value text when available (e.g. "2025-12-03" instead of "03-DEC-2025")
+			val := prop.MentionText
+			if prop.NormalizedValue != nil && prop.NormalizedValue.Text != "" {
+				val = prop.NormalizedValue.Text
+			}
+			if val == "" && prop.TextAnchor != nil {
+				val = prop.TextAnchor.Content
+			}
+
+			switch pType {
+			case "transaction_withdrawal_date", "transaction_deposit_date":
+				if _, exists := tx["date"]; !exists { // first date wins
+					tx["date"] = val
+				}
+				if strings.HasPrefix(pType, "transaction_withdrawal") {
+					txType = "debit"
+				} else {
+					txType = "credit"
+				}
+			case "transaction_withdrawal":
+				tx["amount"] = val
+				txType = "debit"
+			case "transaction_deposit":
+				tx["amount"] = val
+				txType = "credit"
+			case "transaction_withdrawal_description", "transaction_deposit_description":
+				if _, exists := tx["description"]; !exists {
+					tx["description"] = strings.ReplaceAll(val, "\n", " ")
+				}
+			default:
+				// Apply schema mapping for any other sub-property types
+				key := pType
+				if mappedKey, ok := schema[key]; ok {
+					key = mappedKey
+				}
+				if _, exists := tx[key]; !exists {
+					tx[key] = val
+				}
+			}
+		}
+
+		if txType != "" {
+			tx["type"] = txType
+		}
+
+		if len(tx) > 0 {
+			slog.Debug("Extracted bank statement transaction", "type", txType, "date", tx["date"], "amount", tx["amount"], "description", tx["description"])
+			transactions = append(transactions, tx)
+		}
+	}
+
+	if len(transactions) == 0 {
+		slog.Warn("No table_item entities found in bank statement response — check processor type or document format")
+	} else {
+		slog.Info("Extracted bank statement transactions from table_item entities", "count", len(transactions))
+	}
+
+	return transactions
 }
 
 func (c *Client) ExtractData(doc *documentaipb.Document) *ExtractedData {

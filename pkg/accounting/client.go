@@ -92,6 +92,35 @@ func (p PayoutInput) String() string {
 	return fmt.Sprintf("PayoutInput{OutletName: %v, Platform: %v, PeriodStart: %v, PeriodEnd: %v, SettlementDate: %v, TotalOrders: %v, GrossSalesAmt: %v, RestaurantDiscountAmt: %v, PlatformCommissionAmt: %v, TaxesTcsTdsAmt: %v, MarketingAdsAmt: %v, FinalPayoutAmt: %v, UtrNumber: %v}", p.OutletName, string(p.Platform), p.PeriodStart, p.PeriodEnd, p.SettlementDate, p.TotalOrders, p.GrossSalesAmt, p.RestaurantDiscountAmt, p.PlatformCommissionAmt, p.TaxesTcsTdsAmt, p.MarketingAdsAmt, p.FinalPayoutAmt, p.UtrNumber)
 }
 
+type Account struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"` // bank, cash, credit_card
+}
+
+type AccountInput struct {
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	OpeningBalance int64  `json:"opening_balance"`
+}
+
+type Transaction struct {
+	ID              int     `json:"id"`
+	AccountID       int     `json:"account_id"`
+	Type            string  `json:"type"`   // income, expense
+	Amount          float64 `json:"amount"` // raw value; server Money type handles ×100 conversion
+	TransactionDate *string `json:"transaction_date"`
+	Description     *string `json:"description"`
+}
+
+type TransactionInput struct {
+	AccountID       int     `json:"account_id"`       // required
+	Type            string  `json:"type"`             // "income" or "expense"
+	Amount          float64 `json:"amount"`           // raw decimal; accounting service converts to paise
+	TransactionDate *string `json:"transaction_date"` // YYYY-MM-DD
+	Description     *string `json:"description"`
+}
+
 type Response[T any] struct {
 	Data  T      `json:"data"`
 	Error string `json:"error,omitempty"`
@@ -198,6 +227,65 @@ func (c *Client) CreatePayout(payout PayoutInput) (int, error) {
 	}
 
 	var createResp Response[Payout]
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
+		return 0, err
+	}
+
+	return createResp.Data.ID, nil
+}
+
+func (c *Client) GetOrCreateBankAccount(name string) (int, error) {
+	// List all accounts and find by name (case-insensitive)
+	resp, err := c.request("GET", "accounts", nil)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var listResp Response[[]Account]
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return 0, fmt.Errorf("failed to decode accounts list: %w", err)
+	}
+
+	for _, a := range listResp.Data {
+		if strings.EqualFold(a.Name, name) {
+			return a.ID, nil
+		}
+	}
+
+	// Create if not found
+	input := AccountInput{Name: name, Type: "bank", OpeningBalance: 0}
+	cresp, err := c.request("POST", "accounts", input)
+	if err != nil {
+		return 0, err
+	}
+	defer cresp.Body.Close()
+
+	if cresp.StatusCode != http.StatusCreated && cresp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(cresp.Body)
+		return 0, fmt.Errorf("failed to create bank account: %d %s", cresp.StatusCode, string(body))
+	}
+
+	var createResp Response[Account]
+	if err := json.NewDecoder(cresp.Body).Decode(&createResp); err != nil {
+		return 0, err
+	}
+	return createResp.Data.ID, nil
+}
+
+func (c *Client) CreateTransaction(txn TransactionInput) (int, error) {
+	resp, err := c.request("POST", "transactions", txn)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("failed to create transaction: %d %s", resp.StatusCode, string(body))
+	}
+
+	var createResp Response[Transaction]
 	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
 		return 0, err
 	}
