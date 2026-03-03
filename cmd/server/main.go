@@ -603,19 +603,6 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 	mtype := mimetype.Detect(content)
 	mimeType := mtype.String()
 
-	// 2. Load Schema Config
-	schema := make(map[string]string)
-	if s.cfg.BankStatementConfigPath != "" {
-		data, err := os.ReadFile(s.cfg.BankStatementConfigPath)
-		if err != nil {
-			slog.Error("Failed to read bank statement config", "path", s.cfg.BankStatementConfigPath, "error", err)
-		} else {
-			if err := json.Unmarshal(data, &schema); err != nil {
-				slog.Error("Failed to parse bank statement config", "error", err)
-			}
-		}
-	}
-
 	// 3. Process with DocAI (using BankStatementProcessorID)
 	aiDoc, err := s.docAIClient.ProcessDocument(context.Background(), s.cfg.BankStatementProcessorID, content, mimeType)
 	if err != nil {
@@ -649,7 +636,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 	}
 
 	// 4. Extract Transactions
-	transactions := s.docAIClient.ExtractBankStatementData(aiDoc, schema)
+	transactions := s.docAIClient.ExtractBankStatementData(aiDoc)
 	slog.Info("Extracted transactions", "document_id", docID, "count", len(transactions))
 
 	// 5. Send to Accounting

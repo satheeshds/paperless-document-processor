@@ -92,7 +92,7 @@ func (c *Client) ProcessDocument(ctx context.Context, processorID string, fileCo
 	return resp.Document, nil
 }
 
-func (c *Client) ExtractBankStatementData(doc *documentaipb.Document, schema map[string]string) []map[string]string {
+func (c *Client) ExtractBankStatementData(doc *documentaipb.Document) []map[string]string {
 	var transactions []map[string]string
 
 	// The bank statement processor returns "table_item" entities, each with sub-properties:
@@ -141,13 +141,27 @@ func (c *Client) ExtractBankStatementData(doc *documentaipb.Document, schema map
 					tx["description"] = strings.ReplaceAll(val, "\n", " ")
 				}
 			default:
-				// Apply schema mapping for any other sub-property types
+				// Fallback aliases for other sub-property types
 				key := pType
-				if mappedKey, ok := schema[key]; ok {
-					key = mappedKey
-				}
-				if _, exists := tx[key]; !exists {
-					tx[key] = val
+				switch key {
+				case "transaction_date", "value_date":
+					if _, exists := tx["date"]; !exists {
+						tx["date"] = val
+					}
+				case "narration":
+					if _, exists := tx["description"]; !exists {
+						tx["description"] = strings.ReplaceAll(val, "\n", " ")
+					}
+				case "withdrawal_amount", "debit_amount":
+					tx["amount"] = val
+					txType = "debit"
+				case "deposit_amount", "credit_amount":
+					tx["amount"] = val
+					txType = "credit"
+				case "cheque_number":
+					tx["reference"] = val
+				case "balance":
+					tx["balance"] = val
 				}
 			}
 		}

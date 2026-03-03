@@ -20,7 +20,6 @@ type Config struct {
 	LogLevel                 string
 	PayoutConfigPath         string // JSON file for platform options
 	BankStatementProcessorID string
-	BankStatementConfigPath  string // JSON file for bank statement schema mapping
 
 	// Accounting (optional)
 	AccountingURL  string
@@ -54,7 +53,6 @@ func Load() (*Config, error) {
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),
 
 		BankStatementProcessorID: os.Getenv("BANK_STATEMENT_PROCESSOR_ID"),
-		BankStatementConfigPath:  os.Getenv("BANK_STATEMENT_CONFIG_PATH"),
 	}
 
 	if err := cfg.validate(); err != nil {
