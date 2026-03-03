@@ -76,6 +76,79 @@
                 }
             ]
         },
+        "swiggy-dineout": {
+            "import_configs": [
+                {
+                    "header": true,
+                    "table_name": "swiggy_dineout_order_level",
+                    "sheet": "All Orders",
+                    "range": "A2:AL",
+                    "stop_at_empty": true
+                },
+                {
+                    "header": true,
+                    "table_name": "swiggy_dineout_discounts_pnl",
+                    "sheet": "Discounts P&L",
+                    "range": "B9:K",
+                    "stop_at_empty": true
+                },
+                {
+                    "header": true,
+                    "table_name": "swiggy_dineout_summary",
+                    "sheet": "Summary",
+                    "range": "B17:C18",
+                    "stop_at_empty": true
+                }
+            ],
+            "export_configs": [
+                {
+                    "table_name": "swiggy_dineout_summary",
+                    "reader_configs": [
+                        {
+                            "column_name": "PeriodStart",
+                            "expression": "strftime(strptime(trim(split_part(\"Payout Period\", '-', 1)) || ' ' || year(now()), '%d %B %Y'), '%Y-%m-%d')"
+                        },
+                        {
+                            "column_name": "PeriodEnd",
+                            "expression": "strftime(strptime(trim(split_part(\"Payout Period\", '-', 2)) || ' ' || year(now()), '%d %B %Y'), '%Y-%m-%d')"
+                        },
+                        {
+                            "column_name": "SettlementDate",
+                            "expression": "strftime(strptime(trim(#3) || ' ' || year(now()), '%d %B %Y'), '%Y-%m-%d')"
+                        }
+                    ]
+                },
+                {
+                    "table_name": "swiggy_dineout_order_level",
+                    "reader_configs": [
+                        {
+                            "column_name": "TotalOrders",
+                            "expression": "COUNT(1)"
+                        },
+                        {
+                            "column_name": "GrossSalesAmt",
+                            "expression": "SUM(#12)"
+                        },
+                        {
+                            "column_name": "RestaurantDiscountAmt",
+                            "expression": "SUM(#19)"
+                        },
+                        {
+                            "column_name": "PlatformCommissionAmt",
+                            "expression": "SUM(#34)"
+                        },
+                        {
+                            "column_name": "TaxesTcsTdsAmt",
+                            "expression": "SUM(#36)"
+                        },
+                        {
+                            "column_name": "FinalPayoutAmt",
+                            "expression": "SUM(#38)"
+                        }
+                    ]
+                }
+            ]
+        },
         "zomato": [
             {
                 "header": true,
