@@ -105,9 +105,9 @@ type ImportConfig struct {
 	Sheet         string        `json:"sheet,omitempty"`
 	Range         string        `json:"range,omitempty"`
 	RelativeRange RelativeRange `json:"relative_range,omitempty"`
-	Header        bool          `json:"header,omitempty"`
-	StopAtEmpty   bool          `json:"stop_at_empty,omitempty"`
-	AllVarchar    bool          `json:"all_varchar,omitempty"`
+	Header        *bool         `json:"header,omitempty"`
+	StopAtEmpty   *bool         `json:"stop_at_empty,omitempty"`
+	AllVarchar    *bool         `json:"all_varchar,omitempty"`
 }
 
 type ExportConfig struct {
@@ -132,14 +132,14 @@ func (p PlatformConfig) String() string {
 func (p ImportConfig) ToOptionString() string {
 	var options string
 
-	if p.Header {
-		options += "header=true,"
+	if p.Header != nil {
+		options += fmt.Sprintf("header=%t,", *p.Header)
 	}
-	if p.StopAtEmpty {
-		options += "stop_at_empty=true,"
+	if p.StopAtEmpty != nil {
+		options += fmt.Sprintf("stop_at_empty=%t,", *p.StopAtEmpty)
 	}
-	if p.AllVarchar {
-		options += "all_varchar=true,"
+	if p.AllVarchar != nil {
+		options += fmt.Sprintf("all_varchar=%t,", *p.AllVarchar)
 	}
 	if p.Sheet != "" {
 		options += fmt.Sprintf("sheet='%s',", p.Sheet)

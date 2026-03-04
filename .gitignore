@@ -25,3 +25,5 @@ paperless-gpt/
 # OS files
 Thumbs.db
 .DS_Store
+logs.txt
+raw1.json

@@ -529,9 +529,6 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 		// swiggy sends the amount as negative, so adding it
 		payoutInput.FinalPayoutAmt += payoutInput.MarketingAdsAmt
 
-		if payoutInput.UtrNumber == "" {
-			payoutInput.UtrNumber = doc.OriginalFileName // Fallback
-		}
 		slog.Debug("Extracted payout data from DB", "document_id", docID, "payout_input", payoutInput.String())
 
 		// 5. Send to Accounting

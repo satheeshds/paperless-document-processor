@@ -4,7 +4,6 @@ go 1.24.4
 
 require (
 	cloud.google.com/go/documentai v1.40.0
-	github.com/PuerkitoBio/goquery v1.11.0
 	github.com/duckdb/duckdb-go/v2 v2.5.0
 	github.com/gabriel-vasile/mimetype v1.4.13
 	github.com/joho/godotenv v1.5.1
@@ -18,7 +17,6 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/longrunning v0.7.0 // indirect
-	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/apache/arrow-go/v18 v18.4.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/duckdb/duckdb-go-bindings v0.1.21 // indirect
