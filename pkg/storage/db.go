@@ -2,9 +2,10 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
+	"os"
 	"strings"
 	"time"
 
@@ -253,82 +254,73 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 }
 
 // LoadRowsIntoTable creates (if necessary) a platform-specific DuckDB table from
-// rows returned by the LibreOffice parser service and inserts the provided rows.
+// rows returned by the LibreOffice parser service and bulk-inserts the rows
+// using DuckDB's read_json_auto table function — the same approach used for
+// read_xlsx in the DuckDB path.
 //
-// When the service provides an explicit ordered Headers list those names are used
-// verbatim so that positional `#N` column references in export configs work as
-// expected.  When headers must be derived from the first row's map keys they are
-// sorted alphabetically to guarantee a deterministic (though not xlsx-positional)
-// order; in that case export configs should use named column references instead
-// of positional `#N` references.
-//
-// All values are stored as TEXT.  Export-config expressions should use CAST or
-// TRY_CAST to convert values to numeric types as needed (e.g. CAST(NULLIF(col,'') AS DOUBLE)).
+// All column types are inferred by DuckDB from the JSON data.  Export-config
+// expressions should use TRY_CAST for numeric conversions where needed.
 func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.ParseResult) error {
 	if result == nil || len(result.Rows) == 0 {
 		slog.Warn("LoadRowsIntoTable: no rows to load", "table", tableName)
 		return nil
 	}
 
-	// Build ordered column list.  When headers are explicitly provided by the
-	// service we use them verbatim; otherwise we fall back to the sorted keys of
-	// the first row (alphabetical order to keep the result deterministic).
-	headers := result.Headers
-	if len(headers) == 0 && len(result.Rows) > 0 {
-		for k := range result.Rows[0] {
-			headers = append(headers, k)
-		}
-		sort.Strings(headers)
+	// Serialize rows to a temporary JSON file so DuckDB can read them via
+	// read_json_auto — identical approach to how the DuckDB path uses read_xlsx.
+	jsonBytes, err := json.Marshal(result.Rows)
+	if err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to marshal rows to JSON: %w", err)
 	}
 
-	// Build a quoted, comma-separated column definition list (all TEXT).
-	var colDefs []string
-	var colNames []string
-	for _, h := range headers {
-		quoted := `"` + strings.ReplaceAll(h, `"`, `""`) + `"`
-		colDefs = append(colDefs, quoted+" TEXT")
-		colNames = append(colNames, quoted)
+	tmpFile, err := os.CreateTemp("", "lo-rows-*.json")
+	if err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to create temp JSON file: %w", err)
 	}
+	tmpPath := tmpFile.Name()
 
+	if _, err := tmpFile.Write(jsonBytes); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("LoadRowsIntoTable: failed to write JSON: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("LoadRowsIntoTable: failed to close temp JSON file: %w", err)
+	}
+	defer os.Remove(tmpPath)
+
+	// Escape single quotes in the path for safe SQL embedding (os.CreateTemp
+	// produces safe names, but belt-and-suspenders for portability).
+	safePath := strings.ReplaceAll(tmpPath, "'", "''")
+
+	// 1. Create table schema (LIMIT 0 = structure only, no rows) using
+	//    read_json_auto — mirrors the read_xlsx CREATE TABLE pattern.
 	createStmt := fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s (document_id INTEGER, %s);`,
-		tableName, strings.Join(colDefs, ", "),
+		`CREATE TABLE IF NOT EXISTS %s AS SELECT %d AS document_id, * FROM read_json_auto('%s') LIMIT 0;`,
+		tableName, docID, safePath,
 	)
 	slog.Debug("LoadRowsIntoTable: create table", "query", createStmt)
 	if _, err := d.Conn.Exec(createStmt); err != nil {
-		return fmt.Errorf("failed to create table %s: %w", tableName, err)
+		return fmt.Errorf("LoadRowsIntoTable: failed to create table %s: %w", tableName, err)
 	}
 
-	// Insert each row using a prepared statement with positional parameters.
-	placeholders := make([]string, len(headers)+1)
-	placeholders[0] = "?"
-	for i := range headers {
-		placeholders[i+1] = "?"
-	}
+	// 2. Bulk-insert all rows in a single statement.  BY NAME maps JSON columns
+	//    to table columns by name so additional/missing columns don't cause errors.
 	insertStmt := fmt.Sprintf(
-		`INSERT INTO %s (document_id, %s) VALUES (%s);`,
-		tableName, strings.Join(colNames, ", "), strings.Join(placeholders, ", "),
+		`INSERT INTO %s BY NAME SELECT %d AS document_id, * FROM read_json_auto('%s');`,
+		tableName, docID, safePath,
 	)
-	slog.Debug("LoadRowsIntoTable: insert statement", "query", insertStmt)
-
-	stmt, err := d.Conn.Prepare(insertStmt)
-	if err != nil {
-		return fmt.Errorf("failed to prepare insert for table %s: %w", tableName, err)
-	}
-	defer stmt.Close()
-
-	for _, row := range result.Rows {
-		args := make([]interface{}, len(headers)+1)
-		args[0] = docID
-		for i, h := range headers {
-			if v, ok := row[h]; ok {
-				args[i+1] = fmt.Sprintf("%v", v)
-			} else {
-				args[i+1] = nil
-			}
-		}
-		if _, err := stmt.Exec(args...); err != nil {
-			return fmt.Errorf("failed to insert row into %s: %w", tableName, err)
+	slog.Debug("LoadRowsIntoTable: insert", "query", insertStmt)
+	if _, err := d.Conn.Exec(insertStmt); err != nil {
+		// Fallback without BY NAME for older DuckDB versions.
+		slog.Warn("LoadRowsIntoTable: BY NAME insert failed, retrying without BY NAME", "err", err)
+		fallbackStmt := fmt.Sprintf(
+			`INSERT INTO %s SELECT %d AS document_id, * FROM read_json_auto('%s');`,
+			tableName, docID, safePath,
+		)
+		if _, err2 := d.Conn.Exec(fallbackStmt); err2 != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to insert JSON data: %w (fallback: %v)", err, err2)
 		}
 	}
 
