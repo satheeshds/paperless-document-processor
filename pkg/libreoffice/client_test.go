@@ -86,6 +86,47 @@ func TestParse_ServiceError(t *testing.T) {
 	}
 }
 
+func TestParse_DataOnlyFormat_SanitizesColumnNames(t *testing.T) {
+	// Simulates the actual LibreOffice service response: {"data": [...]} with no
+	// "headers" key and xlsx column names that contain literal newlines.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The key "Order level Payout\n(A) - (F) + (G)" contains a real newline.
+		payload := `{"data":[` +
+			`{"Order date":"2026-02-09 12:25:53","Order level Payout\n(A) - (F) + (G)":548.78,"Bank UTR":"ABC123"},` +
+			`{"Order date":"2026-02-10 12:00:00","Order level Payout\n(A) - (F) + (G)":248.15,"Bank UTR":"ABC123"}` +
+			`]}`
+		w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "/data")
+	result, err := client.Parse("documents/originals/invoice.xlsx", "Order Level", "A7:BH", true, true)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(result.Rows) != 2 {
+		t.Errorf("expected 2 rows, got %d", len(result.Rows))
+	}
+	// Newline in column name should be replaced with a space.
+	const wantCol = "Order level Payout (A) - (F) + (G)"
+	if _, ok := result.Rows[0][wantCol]; !ok {
+		t.Errorf("expected sanitized column %q to be present in row, got keys: %v", wantCol, keys(result.Rows[0]))
+	}
+	// Original newlined key must not be present.
+	if _, ok := result.Rows[0]["Order level Payout\n(A) - (F) + (G)"]; ok {
+		t.Error("expected original newlined column name to be absent after sanitization")
+	}
+}
+
+func keys(m map[string]interface{}) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
+
 func TestParse_DataPathPrepended(t *testing.T) {
 	var gotFilePath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

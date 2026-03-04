@@ -119,47 +119,47 @@
                     "reader_configs": [
                         {
                             "column_name": "PeriodStart",
-                            "expression": "MIN(\"Order Date\")"
+                            "expression": "strftime(MIN(TRY_CAST(\"Order date\" AS TIMESTAMP)), '%Y-%m-%d')"
                         },
                         {
                             "column_name": "PeriodEnd",
-                            "expression": "MAX(\"Order Date\")"
+                            "expression": "strftime(MAX(TRY_CAST(\"Order date\" AS TIMESTAMP)), '%Y-%m-%d')"
                         },
                         {
                             "column_name": "TotalOrders",
-                            "expression": "COUNT(1)"
+                            "expression": "COUNT(TRY_CAST(\"Order ID\" AS BIGINT))"
                         },
                         {
                             "column_name": "GrossSalesAmt",
-                            "expression": "SUM(CAST(NULLIF(\"Total MRP of Items Ordered\", '') AS DOUBLE))"
+                            "expression": "SUM(TRY_CAST(NULLIF(\"Subtotal (items total)\", '') AS DOUBLE))"
                         },
                         {
                             "column_name": "RestaurantDiscountAmt",
-                            "expression": "SUM(CAST(NULLIF(\"Restaurant Funded Discount\", '') AS DOUBLE))"
+                            "expression": "COALESCE(SUM(TRY_CAST(NULLIF(\"Restaurant discount (Promo)\", '') AS DOUBLE)), 0) + COALESCE(SUM(TRY_CAST(NULLIF(\"Restaurant discount (BOGO, Freebies, Gold, Brand pack & others)\", '') AS DOUBLE)), 0)"
                         },
                         {
                             "column_name": "PlatformCommissionAmt",
-                            "expression": "SUM(CAST(NULLIF(\"Commission\", '') AS DOUBLE))"
+                            "expression": "SUM(TRY_CAST(NULLIF(\"Service fee & payment mechanism fee [(13) + (15) - (16) - (17) + (18)]\", '') AS DOUBLE))"
                         },
                         {
                             "column_name": "TaxesTcsTdsAmt",
-                            "expression": "SUM(CAST(NULLIF(\"TDS\", '') AS DOUBLE))"
+                            "expression": "SUM(TRY_CAST(NULLIF(\"Government charges [(19) + (22) + (23) + (24) + (25)]\", '') AS DOUBLE))"
                         },
                         {
                             "column_name": "MarketingAdsAmt",
-                            "expression": "SUM(CAST(NULLIF(\"Marketing Spends\", '') AS DOUBLE))"
+                            "expression": "SUM(TRY_CAST(NULLIF(\"Extra inventory ads (order level deduction)\", '') AS DOUBLE))"
                         },
                         {
                             "column_name": "FinalPayoutAmt",
-                            "expression": "SUM(CAST(NULLIF(\"Net Payout\", '') AS DOUBLE))"
+                            "expression": "SUM(TRY_CAST(NULLIF(\"Order level Payout (A) - (F) + (G)\", '') AS DOUBLE))"
                         },
                         {
                             "column_name": "UtrNumber",
-                            "expression": "MAX(\"UTR Number\")"
+                            "expression": "MAX(NULLIF(\"Bank UTR\", ''))"
                         },
                         {
                             "column_name": "SettlementDate",
-                            "expression": "MAX(\"Settlement Date\")"
+                            "expression": "strftime(MAX(TRY_CAST(\"Settlement date\" AS TIMESTAMP)), '%Y-%m-%d')"
                         }
                     ]
                 }
