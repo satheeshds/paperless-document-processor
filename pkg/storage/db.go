@@ -4,12 +4,14 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"paperless-document-processor/config"
 	"paperless-document-processor/pkg/accounting"
 	"paperless-document-processor/pkg/excel"
+	"paperless-document-processor/pkg/libreoffice"
 
 	"github.com/duckdb/duckdb-go/v2"
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -248,4 +250,88 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 	}
 	slog.Debug("Constructed payout input", "rows", payoutInput.Get())
 	return payoutInput.Get(), nil
+}
+
+// LoadRowsIntoTable creates (if necessary) a platform-specific DuckDB table from
+// rows returned by the LibreOffice parser service and inserts the provided rows.
+//
+// When the service provides an explicit ordered Headers list those names are used
+// verbatim so that positional `#N` column references in export configs work as
+// expected.  When headers must be derived from the first row's map keys they are
+// sorted alphabetically to guarantee a deterministic (though not xlsx-positional)
+// order; in that case export configs should use named column references instead
+// of positional `#N` references.
+//
+// All values are stored as TEXT.  Export-config expressions should use CAST or
+// TRY_CAST to convert values to numeric types as needed (e.g. CAST(NULLIF(col,'') AS DOUBLE)).
+func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.ParseResult) error {
+	if result == nil || len(result.Rows) == 0 {
+		slog.Warn("LoadRowsIntoTable: no rows to load", "table", tableName)
+		return nil
+	}
+
+	// Build ordered column list.  When headers are explicitly provided by the
+	// service we use them verbatim; otherwise we fall back to the sorted keys of
+	// the first row (alphabetical order to keep the result deterministic).
+	headers := result.Headers
+	if len(headers) == 0 && len(result.Rows) > 0 {
+		for k := range result.Rows[0] {
+			headers = append(headers, k)
+		}
+		sort.Strings(headers)
+	}
+
+	// Build a quoted, comma-separated column definition list (all TEXT).
+	var colDefs []string
+	var colNames []string
+	for _, h := range headers {
+		quoted := `"` + strings.ReplaceAll(h, `"`, `""`) + `"`
+		colDefs = append(colDefs, quoted+" TEXT")
+		colNames = append(colNames, quoted)
+	}
+
+	createStmt := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (document_id INTEGER, %s);`,
+		tableName, strings.Join(colDefs, ", "),
+	)
+	slog.Debug("LoadRowsIntoTable: create table", "query", createStmt)
+	if _, err := d.Conn.Exec(createStmt); err != nil {
+		return fmt.Errorf("failed to create table %s: %w", tableName, err)
+	}
+
+	// Insert each row using a prepared statement with positional parameters.
+	placeholders := make([]string, len(headers)+1)
+	placeholders[0] = "?"
+	for i := range headers {
+		placeholders[i+1] = "?"
+	}
+	insertStmt := fmt.Sprintf(
+		`INSERT INTO %s (document_id, %s) VALUES (%s);`,
+		tableName, strings.Join(colNames, ", "), strings.Join(placeholders, ", "),
+	)
+	slog.Debug("LoadRowsIntoTable: insert statement", "query", insertStmt)
+
+	stmt, err := d.Conn.Prepare(insertStmt)
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert for table %s: %w", tableName, err)
+	}
+	defer stmt.Close()
+
+	for _, row := range result.Rows {
+		args := make([]interface{}, len(headers)+1)
+		args[0] = docID
+		for i, h := range headers {
+			if v, ok := row[h]; ok {
+				args[i+1] = fmt.Sprintf("%v", v)
+			} else {
+				args[i+1] = nil
+			}
+		}
+		if _, err := stmt.Exec(args...); err != nil {
+			return fmt.Errorf("failed to insert row into %s: %w", tableName, err)
+		}
+	}
+
+	slog.Info("LoadRowsIntoTable: loaded rows", "table", tableName, "count", len(result.Rows))
+	return nil
 }

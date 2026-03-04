@@ -102,6 +102,69 @@
                 }
             ]
         },
+        "zomato": {
+            "import_configs": [
+                {
+                    "method": "libreoffice",
+                    "table_name": "zomato_order_level",
+                    "sheet": "Order Level",
+                    "range": "A7:BH",
+                    "header": true,
+                    "stop_at_empty": true
+                }
+            ],
+            "export_configs": [
+                {
+                    "table_name": "zomato_order_level",
+                    "reader_configs": [
+                        {
+                            "column_name": "PeriodStart",
+                            "expression": "MIN(\"Order Date\")"
+                        },
+                        {
+                            "column_name": "PeriodEnd",
+                            "expression": "MAX(\"Order Date\")"
+                        },
+                        {
+                            "column_name": "TotalOrders",
+                            "expression": "COUNT(1)"
+                        },
+                        {
+                            "column_name": "GrossSalesAmt",
+                            "expression": "SUM(CAST(NULLIF(\"Total MRP of Items Ordered\", '') AS DOUBLE))"
+                        },
+                        {
+                            "column_name": "RestaurantDiscountAmt",
+                            "expression": "SUM(CAST(NULLIF(\"Restaurant Funded Discount\", '') AS DOUBLE))"
+                        },
+                        {
+                            "column_name": "PlatformCommissionAmt",
+                            "expression": "SUM(CAST(NULLIF(\"Commission\", '') AS DOUBLE))"
+                        },
+                        {
+                            "column_name": "TaxesTcsTdsAmt",
+                            "expression": "SUM(CAST(NULLIF(\"TDS\", '') AS DOUBLE))"
+                        },
+                        {
+                            "column_name": "MarketingAdsAmt",
+                            "expression": "SUM(CAST(NULLIF(\"Marketing Spends\", '') AS DOUBLE))"
+                        },
+                        {
+                            "column_name": "FinalPayoutAmt",
+                            "expression": "SUM(CAST(NULLIF(\"Net Payout\", '') AS DOUBLE))"
+                        },
+                        {
+                            "column_name": "UtrNumber",
+                            "expression": "MAX(\"UTR Number\")"
+                        },
+                        {
+                            "column_name": "SettlementDate",
+                            "expression": "MAX(\"Settlement Date\")"
+                        }
+                    ]
+                }
+            ]
+        },
         "swiggy-dineout": {
             "import_configs": [
                 {

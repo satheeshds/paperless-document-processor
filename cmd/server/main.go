@@ -14,6 +14,7 @@ import (
 	"paperless-document-processor/config"
 	"paperless-document-processor/pkg/accounting"
 	"paperless-document-processor/pkg/docai"
+	"paperless-document-processor/pkg/libreoffice"
 	"paperless-document-processor/pkg/paperless"
 	"paperless-document-processor/pkg/storage"
 	"paperless-document-processor/pkg/tika"
@@ -22,15 +23,16 @@ import (
 )
 
 type Server struct {
-	cfg              *config.Config
-	db               *storage.DB
-	paperlessClient  *paperless.Client
-	docAIClient      *docai.Client
-	accountingClient *accounting.Client // nil if not configured
-	tikaClient       *tika.Client       // nil if not configured
-	customFields     map[string]int     // Name -> ID
-	tagIDs           map[string]int     // Name -> ID (e.g., "Swiggy" -> 3)
-	duckDBConfigs    map[int]config.PlatformConfig
+	cfg                  *config.Config
+	db                   *storage.DB
+	paperlessClient      *paperless.Client
+	docAIClient          *docai.Client
+	accountingClient     *accounting.Client    // nil if not configured
+	tikaClient           *tika.Client          // nil if not configured
+	libreOfficeClient    *libreoffice.Client   // nil if not configured
+	customFields         map[string]int        // Name -> ID
+	tagIDs               map[string]int        // Name -> ID (e.g., "Swiggy" -> 3)
+	duckDBConfigs        map[int]config.PlatformConfig
 }
 
 type BillRequest struct {
@@ -97,16 +99,26 @@ func main() {
 		slog.Info("Accounting integration disabled (ACCOUNTING_URL not set)")
 	}
 
+	// Init LibreOffice parser client (optional)
+	var loClient *libreoffice.Client
+	if cfg.LibreOfficeURL != "" {
+		loClient = libreoffice.NewClient(cfg.LibreOfficeURL, cfg.LibreOfficeDataPath)
+		slog.Info("LibreOffice parser integration enabled", "url", cfg.LibreOfficeURL, "data_path", cfg.LibreOfficeDataPath)
+	} else {
+		slog.Info("LibreOffice parser integration disabled (LIBREOFFICE_URL not set)")
+	}
+
 	srv := &Server{
-		cfg:              cfg,
-		db:               db,
-		paperlessClient:  pClient,
-		docAIClient:      dClient,
-		accountingClient: acClient,
-		tikaClient:       tika.NewClient(cfg.TikaURL),
-		customFields:     make(map[string]int),
-		tagIDs:           make(map[string]int),
-		duckDBConfigs:    make(map[int]config.PlatformConfig),
+		cfg:               cfg,
+		db:                db,
+		paperlessClient:   pClient,
+		docAIClient:       dClient,
+		accountingClient:  acClient,
+		tikaClient:        tika.NewClient(cfg.TikaURL),
+		libreOfficeClient: loClient,
+		customFields:      make(map[string]int),
+		tagIDs:            make(map[string]int),
+		duckDBConfigs:     make(map[int]config.PlatformConfig),
 	}
 
 	// 4. Fetch Custom Fields (Retry policy could be added)
@@ -510,11 +522,47 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 	filePath := fmt.Sprintf("/app/media/%s", filename)
 
 	if (strings.HasSuffix(strings.ToLower(filename), ".xlsx") || strings.HasSuffix(strings.ToLower(filename), ".xls")) && platform != "" {
-		slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
+		// Check whether any import config requests the LibreOffice method.
+		hasLibreOffice := false
+		for _, ic := range option.ImportConfigs {
+			if ic.UseLibreOffice() {
+				hasLibreOffice = true
+				break
+			}
+		}
 
-		if err := s.db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
-			slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
-			return
+		if hasLibreOffice {
+			if s.libreOfficeClient == nil {
+				slog.Error("LibreOffice import method requested but LIBREOFFICE_URL is not configured", "document_id", docID)
+				return
+			}
+			slog.Info("Excel file detected in payout, storing via LibreOffice parser", "path", filename, "platform", platform)
+
+			for _, importConfig := range option.ImportConfigs {
+				if !importConfig.UseLibreOffice() {
+					continue
+				}
+				hasHeader := importConfig.Header == nil || *importConfig.Header
+				stopAtEmpty := importConfig.StopAtEmpty != nil && *importConfig.StopAtEmpty
+				result, err := s.libreOfficeClient.Parse(filename, importConfig.Sheet, importConfig.Range, hasHeader, stopAtEmpty)
+				if err != nil {
+					slog.Error("LibreOffice parse failed", "document_id", docID, "sheet", importConfig.Sheet, "error", err)
+					return
+				}
+
+				tableName := importConfig.GetTableName(platform)
+				if err := s.db.LoadRowsIntoTable(docID, tableName, result); err != nil {
+					slog.Error("Failed to load LibreOffice rows into table", "document_id", docID, "table", tableName, "error", err)
+					return
+				}
+			}
+		} else {
+			slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
+
+			if err := s.db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
+				slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
+				return
+			}
 		}
 
 		payoutInput, err := s.db.GetPlatformExcelRows(docID, platform, option)

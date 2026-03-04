@@ -28,6 +28,10 @@ type Config struct {
 
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
+
+	// LibreOffice parser service (optional, used for payout XLSX when DuckDB fails)
+	LibreOfficeURL      string
+	LibreOfficeDataPath string
 }
 
 func Load() (*Config, error) {
@@ -51,6 +55,9 @@ func Load() (*Config, error) {
 
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),
+
+		LibreOfficeURL:      getEnv("LIBREOFFICE_URL", "http://localhost:8091"),
+		LibreOfficeDataPath: getEnv("LIBREOFFICE_DATA_PATH", "/data"),
 
 		BankStatementProcessorID: os.Getenv("BANK_STATEMENT_PROCESSOR_ID"),
 	}
@@ -108,6 +115,9 @@ type ImportConfig struct {
 	Header        *bool         `json:"header,omitempty"`
 	StopAtEmpty   *bool         `json:"stop_at_empty,omitempty"`
 	AllVarchar    *bool         `json:"all_varchar,omitempty"`
+	// Method controls which backend reads the Excel file.
+	// Accepted values: "duckdb" (default) or "libreoffice".
+	Method string `json:"method,omitempty"`
 }
 
 type ExportConfig struct {
@@ -167,6 +177,12 @@ func (p ImportConfig) GetTableName(platform string) string {
 		return p.TableName
 	}
 	return fmt.Sprintf("payout_%s_%s_%s", strings.ToLower(platform), strings.ReplaceAll(p.Sheet, " ", "_"), strings.ReplaceAll(p.Range, ":", "_"))
+}
+
+// UseLibreOffice reports whether this import config should be processed by the
+// LibreOffice parser service rather than DuckDB.
+func (p ImportConfig) UseLibreOffice() bool {
+	return strings.EqualFold(p.Method, "libreoffice")
 }
 
 func (p ExportConfig) GetTableName(platform string) string {
