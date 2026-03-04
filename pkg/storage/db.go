@@ -204,7 +204,7 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 		}
 		rows.Scan(&rowCount)
 
-		if !option.Header {
+		if option.Header != nil && !*option.Header {
 			rowCount--
 		}
 
