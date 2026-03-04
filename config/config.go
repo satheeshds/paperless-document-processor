@@ -133,13 +133,13 @@ func (p ImportConfig) ToOptionString() string {
 	var options string
 
 	if p.Header {
-		options += "header=true,"
+		options += fmt.Sprintf("header=%t,", p.Header)
 	}
 	if p.StopAtEmpty {
-		options += "stop_at_empty=true,"
+		options += fmt.Sprintf("stop_at_empty=%t,", p.StopAtEmpty)
 	}
 	if p.AllVarchar {
-		options += "all_varchar=true,"
+		options += fmt.Sprintf("all_varchar=%t,", p.AllVarchar)
 	}
 	if p.Sheet != "" {
 		options += fmt.Sprintf("sheet='%s',", p.Sheet)
