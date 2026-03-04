@@ -22,9 +22,17 @@
                     "sheet": "Other charges and deductions",
                     "relative_range": {
                         "relative_config_index": 1,
-                        "rows_offset": 2
+                        "rows_offset": 3
                     },
                     "stop_at_empty": true
+                },
+                {
+                    "table_name": "swiggy_payout_details",
+                    "header": false,
+                    "sheet": "Summary",
+                    "range": "B11:C16",
+                    "stop_at_empty": true,
+                    "all_varchar": true
                 }
             ],
             "export_configs": [
@@ -70,7 +78,25 @@
                     "reader_configs": [
                         {
                             "column_name": "MarketingAdsAmt",
-                            "expression": "SUM(#4)"
+                            "expression": "sum(try_cast(regexp_replace(#4, '[^0-9.]', '') as double))"
+                        }
+                    ]
+                },
+                {
+                    "table_name": "swiggy_payout_details",
+                    "reader_configs": [
+                        {
+                            "column_name": "UtrNumber",
+                            "expression": "MAX(CASE WHEN #2 = 'Bank UTR' THEN #3 END)"
+                        }
+                    ]
+                },
+                {
+                    "table_name": "swiggy_payout_details",
+                    "reader_configs": [
+                        {
+                            "column_name": "SettlementDate",
+                            "expression": "MAX(CASE WHEN #2 = 'Payout Settlement Date' THEN #3 END)"
                         }
                     ]
                 }
@@ -148,13 +174,6 @@
                     ]
                 }
             ]
-        },
-        "zomato": [
-            {
-                "header": true,
-                "sheet": "Payout Breakup",
-                "all_varchar": true
-            }
-        ]
+        }
     }
 }
