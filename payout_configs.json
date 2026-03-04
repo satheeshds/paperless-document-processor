@@ -103,9 +103,9 @@
             ]
         },
         "zomato": {
+            "method": "libreoffice",
             "import_configs": [
                 {
-                    "method": "libreoffice",
                     "table_name": "zomato_order_level",
                     "sheet": "Order Level",
                     "range": "A7:BH",

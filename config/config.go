@@ -103,6 +103,9 @@ type PayoutConfigs struct {
 }
 
 type PlatformConfig struct {
+	// Method controls which backend reads the Excel file for this platform.
+	// Accepted values: "duckdb" (default) or "libreoffice".
+	Method        string         `json:"method,omitempty"`
 	ImportConfigs []ImportConfig `json:"import_configs,omitempty"`
 	ExportConfigs []ExportConfig `json:"export_configs,omitempty"`
 }
@@ -115,9 +118,6 @@ type ImportConfig struct {
 	Header        *bool         `json:"header,omitempty"`
 	StopAtEmpty   *bool         `json:"stop_at_empty,omitempty"`
 	AllVarchar    *bool         `json:"all_varchar,omitempty"`
-	// Method controls which backend reads the Excel file.
-	// Accepted values: "duckdb" (default) or "libreoffice".
-	Method string `json:"method,omitempty"`
 }
 
 type ExportConfig struct {
@@ -179,9 +179,9 @@ func (p ImportConfig) GetTableName(platform string) string {
 	return fmt.Sprintf("payout_%s_%s_%s", strings.ToLower(platform), strings.ReplaceAll(p.Sheet, " ", "_"), strings.ReplaceAll(p.Range, ":", "_"))
 }
 
-// UseLibreOffice reports whether this import config should be processed by the
+// UseLibreOffice reports whether this platform should be processed by the
 // LibreOffice parser service rather than DuckDB.
-func (p ImportConfig) UseLibreOffice() bool {
+func (p PlatformConfig) UseLibreOffice() bool {
 	return strings.EqualFold(p.Method, "libreoffice")
 }
 

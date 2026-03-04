@@ -517,16 +517,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 	filePath := fmt.Sprintf("/app/media/%s", filename)
 
 	if (strings.HasSuffix(strings.ToLower(filename), ".xlsx") || strings.HasSuffix(strings.ToLower(filename), ".xls")) && platform != "" {
-		// Check whether any import config requests the LibreOffice method.
-		hasLibreOffice := false
-		for _, ic := range option.ImportConfigs {
-			if ic.UseLibreOffice() {
-				hasLibreOffice = true
-				break
-			}
-		}
-
-		if hasLibreOffice {
+		if option.UseLibreOffice() {
 			if s.libreOfficeClient == nil {
 				slog.Error("LibreOffice import method requested but LIBREOFFICE_URL is not configured", "document_id", docID)
 				return
@@ -534,9 +525,6 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 			slog.Info("Excel file detected in payout, storing via LibreOffice parser", "path", filename, "platform", platform)
 
 			for _, importConfig := range option.ImportConfigs {
-				if !importConfig.UseLibreOffice() {
-					continue
-				}
 				hasHeader := importConfig.Header == nil || *importConfig.Header
 				stopAtEmpty := importConfig.StopAtEmpty != nil && *importConfig.StopAtEmpty
 				result, err := s.libreOfficeClient.Parse(filename, importConfig.Sheet, importConfig.Range, hasHeader, stopAtEmpty)
