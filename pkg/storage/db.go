@@ -202,10 +202,15 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 		if rows.Err() != nil {
 			return excel.Range{}, fmt.Errorf("failed to query platform table: %w", rows.Err())
 		}
-		rows.Scan(&rowCount)
+		if err := rows.Scan(&rowCount); err != nil {
+			return excel.Range{}, fmt.Errorf("failed to scan row count: %w", err)
+		}
 
 		if option.Header != nil && !*option.Header {
 			rowCount--
+		}
+		if rowCount < 0 {
+			rowCount = 0
 		}
 
 		lastCell := excel.Cell{
