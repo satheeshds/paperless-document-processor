@@ -99,9 +99,14 @@ func main() {
 		slog.Info("Accounting integration disabled (ACCOUNTING_URL not set)")
 	}
 
-	// Init LibreOffice parser client
-	loClient := libreoffice.NewClient(cfg.LibreOfficeURL, cfg.LibreOfficeDataPath)
-	slog.Info("LibreOffice parser integration configured", "url", cfg.LibreOfficeURL, "data_path", cfg.LibreOfficeDataPath)
+	// Init LibreOffice parser client (optional)
+	var loClient *libreoffice.Client
+	if cfg.LibreOfficeURL != "" {
+		loClient = libreoffice.NewClient(cfg.LibreOfficeURL, cfg.LibreOfficeDataPath)
+		slog.Info("LibreOffice parser integration configured", "url", cfg.LibreOfficeURL, "data_path", cfg.LibreOfficeDataPath)
+	} else {
+		slog.Info("LibreOffice parser integration disabled (LIBREOFFICE_URL not set)")
+	}
 
 	srv := &Server{
 		cfg:               cfg,
