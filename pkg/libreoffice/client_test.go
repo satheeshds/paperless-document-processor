@@ -137,7 +137,13 @@ func TestParse_DataPathPrepended(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "/mnt/media")
-	client.Parse("documents/originals/test.xlsx", "", "", false, false)
+	result, err := client.Parse("documents/originals/test.xlsx", "", "", false, false)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
 	if gotFilePath != "/mnt/media/documents/originals/test.xlsx" {
 		t.Errorf("expected /mnt/media/documents/originals/test.xlsx, got %s", gotFilePath)
 	}
