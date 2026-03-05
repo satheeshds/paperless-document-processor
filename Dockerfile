@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # Build Stage
 FROM golang:1.24-bookworm AS builder
 
@@ -8,16 +10,18 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     libc6-dev \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY . .
 
 # Build the application with CGO enabled
-RUN CGO_ENABLED=1 GOOS=linux go build -o main cmd/server/main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=linux go build -o main cmd/server/main.go
 
 # Runtime Stage
 FROM debian:bookworm-slim

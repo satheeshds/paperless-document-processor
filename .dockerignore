@@ -1,0 +1,38 @@
+.git
+.gitignore
+.dockerignore
+
+# Go build artifacts
+*.exe
+main
+
+# Database
+duck.db
+duck.db.log
+duck.db.wal
+data/
+
+# Environment
+.env
+
+# Temporary/Processing Files
+document_*.json
+*_tika.html
+*_tika.json
+
+# User specific folders
+paperless-gpt/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store
+logs.txt
+raw1.json
+
+# Docs / compose
+README.md
+docker-compose.yml
