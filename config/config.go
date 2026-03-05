@@ -56,7 +56,7 @@ func Load() (*Config, error) {
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),
 
-		LibreOfficeURL:      getEnv("LIBREOFFICE_URL", "http://localhost:8091"),
+		LibreOfficeURL:      os.Getenv("LIBREOFFICE_URL"),
 		LibreOfficeDataPath: getEnv("LIBREOFFICE_DATA_PATH", "/data"),
 
 		BankStatementProcessorID: os.Getenv("BANK_STATEMENT_PROCESSOR_ID"),
