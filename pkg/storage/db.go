@@ -272,6 +272,18 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	if err != nil {
 		return fmt.Errorf("LoadRowsIntoTable: failed to marshal rows to JSON: %w", err)
 	}
+	// Validate that we have at least one non-empty header; otherwise we would
+	// generate invalid SQL such as "document_id INTEGER, )" or an empty column list.
+	if len(headers) == 0 {
+		slog.Warn("LoadRowsIntoTable: no valid headers derived for table", "table", tableName)
+		return fmt.Errorf("LoadRowsIntoTable: no valid headers for table %s", tableName)
+	}
+	for _, h := range headers {
+		if h == "" {
+			slog.Warn("LoadRowsIntoTable: empty header encountered for table", "table", tableName)
+			return fmt.Errorf("LoadRowsIntoTable: empty header encountered for table %s", tableName)
+		}
+	}
 
 	tmpFile, err := os.CreateTemp("", "lo-rows-*.json")
 	if err != nil {
