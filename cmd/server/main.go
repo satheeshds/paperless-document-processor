@@ -523,7 +523,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 
 	if (strings.HasSuffix(strings.ToLower(filename), ".xlsx") || strings.HasSuffix(strings.ToLower(filename), ".xls")) && platform != "" {
 		if option.UseLibreOffice() {
-			if s.libreOfficeClient == nil {
+			if s.libreOfficeClient == nil || s.cfg == nil || s.cfg.LibreOfficeURL == "" {
 				slog.Error("LibreOffice import method requested but LIBREOFFICE_URL is not configured", "document_id", docID)
 				return
 			}
