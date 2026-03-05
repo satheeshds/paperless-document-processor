@@ -25,13 +25,23 @@ type ParseResult struct {
 	Rows    []map[string]interface{}
 }
 
-// parseResponse mirrors the JSON envelope returned by the service when
-// as_table=true.  The service returns {"data": [...]} where each element is a
-// row object whose keys are the (possibly multi-line) xlsx column headers.
+// parseResponse mirrors the JSON envelope returned by the service for the
+// row-object format: {"data": [{...}, ...]} where each element is a row map.
 // An optional "headers" key with an ordered list is accepted when present.
 type parseResponse struct {
 	Data    []map[string]interface{} `json:"data"`
 	Headers []string                 `json:"headers"`
+}
+
+// pairResponse mirrors the JSON envelope for the vertical key-value format
+// returned by the service for summary/metadata sheets (as_table=true with a
+// headerless two-column range).  Each element of Data is a [key, value] pair:
+//
+//	{"data": [["Report period", "09 Feb 2026 - 15 Feb 2026"], ["Res id", "22244451"], ...]}
+//
+// The client pivots these pairs into a single wide row before returning.
+type pairResponse struct {
+	Data [][]interface{} `json:"data"`
 }
 
 // sanitizeColumnName replaces newline and carriage-return characters with a
@@ -221,7 +231,7 @@ func (c *Client) Parse(filePath, sheetName, rangeStr string, hasHeader, stopAtEm
 		return nil, fmt.Errorf("failed to read libreoffice response: %w", err)
 	}
 
-	// Try wrapped format: {"data": [...]} (actual LibreOffice service format).
+	// Try wrapped object format: {"data": [{...}, ...]}
 	// An optional "headers" key with an ordered list may also be present.
 	var wrapped parseResponse
 	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Data != nil {
@@ -242,6 +252,35 @@ func (c *Client) Parse(filePath, sheetName, rangeStr string, hasHeader, stopAtEm
 			}
 		}
 		rows := filterRefRows(sanitizeRows(wrapped.Data))
+		return &ParseResult{Headers: headers, Rows: rows}, nil
+	}
+
+	// Try wrapped pair format: {"data": [["key","val"], ...]}
+	// This is the vertical key-value layout returned for summary/metadata sheets.
+	// Each pair is pivoted into a single wide row so the result can be stored in
+	// DuckDB using the same LoadRowsIntoTable path as the row-object format.
+	var pairResp pairResponse
+	if err := json.Unmarshal(body, &pairResp); err == nil && len(pairResp.Data) > 0 {
+		singleRow := make(map[string]interface{}, len(pairResp.Data))
+		headers := make([]string, 0, len(pairResp.Data))
+		for i, pair := range pairResp.Data {
+			if len(pair) != 2 {
+				slog.Warn("Parse: skipping malformed pair (expected 2 elements)", "index", i, "len", len(pair))
+				continue
+			}
+			key, ok := pair[0].(string)
+			if !ok {
+				slog.Warn("Parse: skipping pair with non-string key", "index", i, "key_type", fmt.Sprintf("%T", pair[0]))
+				continue
+			}
+			key = sanitizeColumnName(key)
+			if key == "" {
+				continue
+			}
+			singleRow[key] = pair[1]
+			headers = append(headers, key)
+		}
+		rows := filterRefRows([]map[string]interface{}{singleRow})
 		return &ParseResult{Headers: headers, Rows: rows}, nil
 	}
 

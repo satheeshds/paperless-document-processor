@@ -241,3 +241,67 @@ func TestParse_PreservesColumnOrder_PlainArrayFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestParse_PairFormat_PivotsToSingleRow(t *testing.T) {
+// Simulates the vertical key-value response for summary/metadata sheets
+// (as_table=true with a headerless two-column range), using the exact shape
+// from the real Zomato Summary sheet response.
+server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+w.Header().Set("Content-Type", "application/json")
+payload := `{
+  "data": [
+    ["Report period", "09 Feb 2026 - 15 Feb 2026"],
+    ["Res id", "22244451"],
+    ["Legal entity", "THE NOODLE HOUSE"],
+    ["Total Orders \n(Delivered + Cancelled/ Rejected)", 21.0],
+    ["Net Payout\n(Settled + Unsettled)", 8115.91],
+    ["Bank UTR", "CITIN26622776824"]
+  ],
+  "sheet": "Summary",
+  "filename": "invoice_01.xlsx"
+}`
+w.Write([]byte(payload))
+}))
+defer server.Close()
+
+client := NewClient(server.URL, "/data")
+result, err := client.Parse("documents/originals/invoice.xlsx", "Summary", "B4:C18", false, true)
+if err != nil {
+t.Fatalf("expected no error, got %v", err)
+}
+
+// Pairs must be pivoted into exactly one wide row.
+if len(result.Rows) != 1 {
+t.Fatalf("expected 1 pivoted row, got %d", len(result.Rows))
+}
+
+// Newlines in keys must be sanitised.
+wantHeaders := []string{
+"Report period",
+"Res id",
+"Legal entity",
+"Total Orders  (Delivered + Cancelled/ Rejected)",
+"Net Payout (Settled + Unsettled)",
+"Bank UTR",
+}
+if len(result.Headers) != len(wantHeaders) {
+t.Fatalf("expected %d headers, got %d: %v", len(wantHeaders), len(result.Headers), result.Headers)
+}
+for i, h := range wantHeaders {
+if result.Headers[i] != h {
+t.Errorf("header[%d]: want %q, got %q", i, h, result.Headers[i])
+}
+}
+
+row := result.Rows[0]
+if row["Report period"] != "09 Feb 2026 - 15 Feb 2026" {
+t.Errorf("unexpected Report period: %v", row["Report period"])
+}
+if row["Bank UTR"] != "CITIN26622776824" {
+t.Errorf("unexpected Bank UTR: %v", row["Bank UTR"])
+}
+// Numeric values must be preserved as-is.
+if row["Net Payout (Settled + Unsettled)"] != 8115.91 {
+t.Errorf("unexpected Net Payout: %v", row["Net Payout (Settled + Unsettled)"])
+}
+}
