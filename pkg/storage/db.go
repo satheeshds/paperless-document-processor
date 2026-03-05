@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -253,6 +254,43 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 	return payoutInput.Get(), nil
 }
 
+// marshalOrderedRows encodes rows to JSON with object keys written in the order
+// given by headers.  This ensures that read_json_auto creates DuckDB table
+// columns in the same sequence as the original xlsx spreadsheet, enabling
+// reliable column-index-based access in addition to name-based access.
+//
+// Keys present in headers but absent from a row are emitted as JSON null.
+// Keys in a row that are not in headers are silently omitted.
+func marshalOrderedRows(rows []map[string]interface{}, headers []string) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, row := range rows {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteByte('{')
+		for j, h := range headers {
+			if j > 0 {
+				buf.WriteByte(',')
+			}
+			keyBytes, err := json.Marshal(h)
+			if err != nil {
+				return nil, fmt.Errorf("marshalOrderedRows: key %q: %w", h, err)
+			}
+			buf.Write(keyBytes)
+			buf.WriteByte(':')
+			valBytes, err := json.Marshal(row[h]) // nil → JSON null when key absent
+			if err != nil {
+				return nil, fmt.Errorf("marshalOrderedRows: value for %q: %w", h, err)
+			}
+			buf.Write(valBytes)
+		}
+		buf.WriteByte('}')
+	}
+	buf.WriteByte(']')
+	return buf.Bytes(), nil
+}
+
 // LoadRowsIntoTable creates (if necessary) a platform-specific DuckDB table from
 // rows returned by the LibreOffice parser service and bulk-inserts the rows
 // using DuckDB's read_json_auto table function — the same approach used for
@@ -268,7 +306,15 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 
 	// Serialize rows to a temporary JSON file so DuckDB can read them via
 	// read_json_auto — identical approach to how the DuckDB path uses read_xlsx.
-	jsonBytes, err := json.Marshal(result.Rows)
+	// Use marshalOrderedRows when headers are available so that read_json_auto
+	// creates DuckDB table columns in the original xlsx column sequence.
+	var jsonBytes []byte
+	var err error
+	if len(result.Headers) > 0 {
+		jsonBytes, err = marshalOrderedRows(result.Rows, result.Headers)
+	} else {
+		jsonBytes, err = json.Marshal(result.Rows)
+	}
 	if err != nil {
 		return fmt.Errorf("LoadRowsIntoTable: failed to marshal rows to JSON: %w", err)
 	}

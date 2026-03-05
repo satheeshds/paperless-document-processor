@@ -127,7 +127,7 @@
                         },
                         {
                             "column_name": "TotalOrders",
-                            "expression": "COUNT(TRY_CAST(\"Order ID\" AS BIGINT))"
+                            "expression": "COUNT(\"Order ID\")"
                         },
                         {
                             "column_name": "GrossSalesAmt",

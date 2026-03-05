@@ -160,3 +160,84 @@ func TestParse_DataPathPrepended(t *testing.T) {
 		t.Errorf("expected /mnt/media/documents/originals/test.xlsx, got %s", gotFilePath)
 	}
 }
+
+func TestParse_FiltersRefRows_WrappedFormat(t *testing.T) {
+	// Simulates Zomato payout response where the first row is a summary/totals
+	// row containing "#REF!" formula errors. Those rows must be dropped before
+	// the result is returned so they are never loaded into DuckDB.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		payload := `{"data":[` +
+			`{"Order ID":"#REF!","Order date":"2026-02-01","Subtotal (items total)":"#REF!"},` +
+			`{"Order ID":"123456","Order date":"2026-02-09","Subtotal (items total)":548.78},` +
+			`{"Order ID":"789012","Order date":"2026-02-10","Subtotal (items total)":248.15}` +
+			`]}`
+		w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "/data")
+	result, err := client.Parse("documents/originals/invoice.xlsx", "Order Level", "A7:BH", true, true)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	// First row (#REF!) must be filtered out; only the two valid rows remain.
+	if len(result.Rows) != 2 {
+		t.Errorf("expected 2 rows after #REF! filter, got %d", len(result.Rows))
+	}
+	if result.Rows[0]["Order ID"] != "123456" {
+		t.Errorf("expected first valid row Order ID 123456, got %v", result.Rows[0]["Order ID"])
+	}
+}
+
+func TestParse_PreservesColumnOrder_WrappedFormat(t *testing.T) {
+	// Verifies that ParseResult.Headers reflects the JSON document order from the
+	// service response so that DuckDB table columns match the original xlsx sequence.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Keys are intentionally in a non-alphabetical order to verify ordering.
+		payload := `{"data":[{"Zebra":1,"Apple":2,"Mango":3}]}`
+		w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "/data")
+	result, err := client.Parse("documents/originals/invoice.xlsx", "", "", true, false)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	want := []string{"Zebra", "Apple", "Mango"}
+	if len(result.Headers) != len(want) {
+		t.Fatalf("expected %d headers, got %d: %v", len(want), len(result.Headers), result.Headers)
+	}
+	for i, h := range want {
+		if result.Headers[i] != h {
+			t.Errorf("header[%d]: want %q, got %q", i, h, result.Headers[i])
+		}
+	}
+}
+
+func TestParse_PreservesColumnOrder_PlainArrayFormat(t *testing.T) {
+	// Same ordering check for the plain JSON array fallback path.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		payload := `[{"Zebra":1,"Apple":2,"Mango":3},{"Zebra":4,"Apple":5,"Mango":6}]`
+		w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "/data")
+	result, err := client.Parse("documents/originals/invoice.xlsx", "", "", true, false)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	want := []string{"Zebra", "Apple", "Mango"}
+	if len(result.Headers) != len(want) {
+		t.Fatalf("expected %d headers, got %d: %v", len(want), len(result.Headers), result.Headers)
+	}
+	for i, h := range want {
+		if result.Headers[i] != h {
+			t.Errorf("header[%d]: want %q, got %q", i, h, result.Headers[i])
+		}
+	}
+}

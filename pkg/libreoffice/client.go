@@ -1,13 +1,13 @@
 package libreoffice
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 )
 
@@ -45,8 +45,114 @@ func sanitizeColumnName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-// sanitizeRows returns a new slice of rows where every map key has been
-// sanitised with sanitizeColumnName.
+// filterRefRows removes rows that contain any "#REF!" string value -- Excel
+// formula-error cells that appear in Zomato payout files (e.g. the first
+// summary row that references deleted cells).
+func filterRefRows(rows []map[string]interface{}) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		hasRef := false
+		for _, v := range row {
+			if s, ok := v.(string); ok && s == "#REF!" {
+				hasRef = true
+				break
+			}
+		}
+		if !hasRef {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// parseFirstRowKeys returns the object keys of the first row in a JSON response,
+// in document order, preserving the original xlsx column sequence.
+//
+// Two response shapes are supported:
+//   - {"data": [{...}, ...]}  -- wrapped format (LibreOffice service default)
+//   - [{...}, ...]            -- plain JSON array
+//
+// Keys are returned unsanitised; call sanitizeColumnName on each before use.
+func parseFirstRowKeys(body []byte) []string {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delim {
+	case '[':
+		// Plain array — first element is the first data row.
+		return readFirstObjectKeys(dec)
+	case '{':
+		// Wrapped format — scan object until we find the "data" key.
+		for dec.More() {
+			tok, err := dec.Token()
+			if err != nil {
+				return nil
+			}
+			key, ok := tok.(string)
+			if !ok {
+				return nil
+			}
+			if key != "data" {
+				var skip json.RawMessage
+				if err := dec.Decode(&skip); err != nil {
+					return nil
+				}
+				continue
+			}
+			// Found "data" — expect '['.
+			tok, err = dec.Token()
+			if err != nil {
+				return nil
+			}
+			if tok != json.Delim('[') {
+				return nil
+			}
+			return readFirstObjectKeys(dec)
+		}
+	}
+	return nil
+}
+
+// readFirstObjectKeys reads the key names of the next JSON object from dec,
+// in document order. dec must be positioned just after the opening '[' of the
+// containing array.
+func readFirstObjectKeys(dec *json.Decoder) []string {
+	if !dec.More() {
+		return nil
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return nil
+	}
+	if tok != json.Delim('{') {
+		return nil
+	}
+	var keys []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		k, ok := tok.(string)
+		if !ok {
+			break
+		}
+		keys = append(keys, k)
+		// Consume the value (may be any JSON type).
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil
+		}
+	}
+	return keys
+}
 func sanitizeRows(rows []map[string]interface{}) []map[string]interface{} {
 	out := make([]map[string]interface{}, len(rows))
 	for i, row := range rows {
@@ -119,11 +225,24 @@ func (c *Client) Parse(filePath, sheetName, rangeStr string, hasHeader, stopAtEm
 	// An optional "headers" key with an ordered list may also be present.
 	var wrapped parseResponse
 	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Data != nil {
-		sanitizedHeaders := make([]string, len(wrapped.Headers))
-		for i, h := range wrapped.Headers {
-			sanitizedHeaders[i] = sanitizeColumnName(h)
+		var headers []string
+		if len(wrapped.Headers) > 0 {
+			// Use service-provided ordered header list.
+			headers = make([]string, len(wrapped.Headers))
+			for i, h := range wrapped.Headers {
+				headers[i] = sanitizeColumnName(h)
+			}
+		} else {
+			// Derive column order from the raw JSON body so the DuckDB table
+			// columns match the original xlsx column sequence.
+			raw := parseFirstRowKeys(body)
+			headers = make([]string, len(raw))
+			for i, h := range raw {
+				headers[i] = sanitizeColumnName(h)
+			}
 		}
-		return &ParseResult{Headers: sanitizedHeaders, Rows: sanitizeRows(wrapped.Data)}, nil
+		rows := filterRefRows(sanitizeRows(wrapped.Data))
+		return &ParseResult{Headers: headers, Rows: rows}, nil
 	}
 
 	// Fallback: plain JSON array of row objects
@@ -131,19 +250,13 @@ func (c *Client) Parse(filePath, sheetName, rangeStr string, hasHeader, stopAtEm
 	if err := json.Unmarshal(body, &rows); err != nil {
 		return nil, fmt.Errorf("failed to parse libreoffice response: %w", err)
 	}
-	rows = sanitizeRows(rows)
+	rows = filterRefRows(sanitizeRows(rows))
 
-	// Derive header list from the first row's (already sanitised) keys.  Go maps
-	// have non-deterministic iteration order, so keys are sorted alphabetically
-	// to keep the result deterministic.
-	// NOTE: positional `#N` column references in export configs will NOT work
-	// reliably; use named column references instead.
-	var headers []string
-	if len(rows) > 0 {
-		for k := range rows[0] {
-			headers = append(headers, k)
-		}
-		sort.Strings(headers)
+	// Derive header list from the raw JSON body to preserve document order.
+	raw := parseFirstRowKeys(body)
+	headers := make([]string, len(raw))
+	for i, h := range raw {
+		headers[i] = sanitizeColumnName(h)
 	}
 
 	return &ParseResult{Headers: headers, Rows: rows}, nil
