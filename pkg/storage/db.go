@@ -262,8 +262,8 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 // expressions should use TRY_CAST for numeric conversions where needed.
 func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.ParseResult) error {
 	if result == nil || len(result.Rows) == 0 {
-		slog.Warn("LoadRowsIntoTable: no rows to load", "table", tableName)
-		return nil
+		slog.Warn("LoadRowsIntoTable: no rows to load", "table", tableName, "docID", docID)
+		return fmt.Errorf("LoadRowsIntoTable: no rows to load for table %s (docID=%d)", tableName, docID)
 	}
 
 	// Serialize rows to a temporary JSON file so DuckDB can read them via
