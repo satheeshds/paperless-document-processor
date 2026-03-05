@@ -14,6 +14,7 @@ import (
 	"paperless-document-processor/config"
 	"paperless-document-processor/pkg/accounting"
 	"paperless-document-processor/pkg/docai"
+	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
 	"paperless-document-processor/pkg/paperless"
 	"paperless-document-processor/pkg/storage"
@@ -529,7 +530,42 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 			}
 			slog.Info("Excel file detected in payout, storing via LibreOffice parser", "path", filename, "platform", platform)
 
-			for _, importConfig := range option.ImportConfigs {
+			// resultRowCounts tracks the number of data rows loaded for each
+			// import config so that subsequent configs with RelativeRange can
+			// compute their start row correctly.
+			resultRowCounts := make([]int, len(option.ImportConfigs))
+
+			for i, importConfig := range option.ImportConfigs {
+				// Resolve relative range if configured.
+				if importConfig.RelativeRange.RelativeConfigIndex > 0 {
+					refIdx := importConfig.RelativeRange.RelativeConfigIndex
+					if refIdx >= i {
+						slog.Error("LibreOffice relative range: RelativeConfigIndex must reference an earlier config", "document_id", docID, "config_index", i, "relative_config_index", refIdx)
+						return
+					}
+					relativeOption := option.ImportConfigs[refIdx]
+					refRowCount := resultRowCounts[refIdx]
+					// Mirror the DuckDB GetRangeEnd row-count adjustment:
+					// decrement only when the referenced config explicitly sets
+					// header=false.
+					if relativeOption.Header != nil && !*relativeOption.Header {
+						refRowCount--
+					}
+					if refRowCount < 0 {
+						refRowCount = 0
+					}
+					refRange, err := excel.NewRange(relativeOption.Range)
+					if err != nil {
+						slog.Error("LibreOffice relative range: failed to parse referenced range", "document_id", docID, "range", relativeOption.Range, "error", err)
+						return
+					}
+					// Build the new range using the referenced config's columns
+					// but with a computed start row.
+					refRange.Start.Row = refRange.Start.Row + refRowCount + importConfig.RelativeRange.RowsOffset
+					importConfig.Range = refRange.String()
+					slog.Debug("LibreOffice relative range resolved", "config_index", i, "computed_range", importConfig.Range)
+				}
+
 				hasHeader := importConfig.Header == nil || *importConfig.Header
 				stopAtEmpty := importConfig.StopAtEmpty != nil && *importConfig.StopAtEmpty
 				result, err := s.libreOfficeClient.Parse(filename, importConfig.Sheet, importConfig.Range, hasHeader, stopAtEmpty)
@@ -537,6 +573,15 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 					slog.Error("LibreOffice parse failed", "document_id", docID, "sheet", importConfig.Sheet, "error", err)
 					return
 				}
+
+				// Drop the last row when the import config declares a footer
+				// row (i.e. a totals/summary row appended by Excel).
+				if importConfig.Footer != nil && *importConfig.Footer && len(result.Rows) > 0 {
+					slog.Debug("LibreOffice footer row dropped", "table", importConfig.GetTableName(platform), "rows_before", len(result.Rows))
+					result.Rows = result.Rows[:len(result.Rows)-1]
+				}
+
+				resultRowCounts[i] = len(result.Rows)
 
 				tableName := importConfig.GetTableName(platform)
 				if err := s.db.LoadRowsIntoTable(docID, tableName, result); err != nil {

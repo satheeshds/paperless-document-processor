@@ -118,6 +118,11 @@ type ImportConfig struct {
 	Header        *bool         `json:"header,omitempty"`
 	StopAtEmpty   *bool         `json:"stop_at_empty,omitempty"`
 	AllVarchar    *bool         `json:"all_varchar,omitempty"`
+	// Footer indicates that the last row returned by the service is a totals /
+	// summary footer row that should be excluded from the loaded data.  When
+	// true, the final row of each parsed result is dropped before it is
+	// inserted into DuckDB.
+	Footer *bool `json:"footer,omitempty"`
 }
 
 type ExportConfig struct {
