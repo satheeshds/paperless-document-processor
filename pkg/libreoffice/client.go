@@ -78,6 +78,10 @@ func NewClient(baseURL, dataPath string) *Client {
 // (e.g. "documents/originals/2022/01/invoice.xlsx").  The client prepends its
 // configured dataPath so the service receives an absolute path.
 func (c *Client) Parse(filePath, sheetName, rangeStr string, hasHeader, stopAtEmpty bool) (*ParseResult, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("libreoffice client: baseURL is not configured (set LIBREOFFICE_URL)")
+	}
+
 	fullPath := c.dataPath + "/" + strings.TrimLeft(filePath, "/")
 
 	params := url.Values{}

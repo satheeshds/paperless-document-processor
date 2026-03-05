@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -125,6 +126,17 @@ func keys(m map[string]interface{}) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+func TestParse_EmptyBaseURL_ReturnsError(t *testing.T) {
+	client := NewClient("", "/data")
+	_, err := client.Parse("documents/originals/test.xlsx", "", "", false, false)
+	if err == nil {
+		t.Fatal("expected error when baseURL is empty")
+	}
+	if !strings.Contains(err.Error(), "baseURL is not configured") {
+		t.Errorf("expected configuration error, got: %v", err)
+	}
 }
 
 func TestParse_DataPathPrepended(t *testing.T) {
