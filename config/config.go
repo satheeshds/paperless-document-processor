@@ -28,6 +28,10 @@ type Config struct {
 
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
+
+	// LibreOffice parser service (optional, used for payout XLSX when DuckDB fails)
+	LibreOfficeURL      string
+	LibreOfficeDataPath string
 }
 
 func Load() (*Config, error) {
@@ -51,6 +55,9 @@ func Load() (*Config, error) {
 
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),
+
+		LibreOfficeURL:      os.Getenv("LIBREOFFICE_URL"),
+		LibreOfficeDataPath: getEnv("LIBREOFFICE_DATA_PATH", "/data"),
 
 		BankStatementProcessorID: os.Getenv("BANK_STATEMENT_PROCESSOR_ID"),
 	}
@@ -96,6 +103,9 @@ type PayoutConfigs struct {
 }
 
 type PlatformConfig struct {
+	// Method controls which backend reads the Excel file for this platform.
+	// Accepted values: "duckdb" (default) or "libreoffice".
+	Method        string         `json:"method,omitempty"`
 	ImportConfigs []ImportConfig `json:"import_configs,omitempty"`
 	ExportConfigs []ExportConfig `json:"export_configs,omitempty"`
 }
@@ -108,6 +118,11 @@ type ImportConfig struct {
 	Header        *bool         `json:"header,omitempty"`
 	StopAtEmpty   *bool         `json:"stop_at_empty,omitempty"`
 	AllVarchar    *bool         `json:"all_varchar,omitempty"`
+	// Footer indicates that the last row returned by the service is a totals /
+	// summary footer row that should be excluded from the loaded data.  When
+	// true, the final row of each parsed result is dropped before it is
+	// inserted into DuckDB.
+	Footer *bool `json:"footer,omitempty"`
 }
 
 type ExportConfig struct {
@@ -167,6 +182,12 @@ func (p ImportConfig) GetTableName(platform string) string {
 		return p.TableName
 	}
 	return fmt.Sprintf("payout_%s_%s_%s", strings.ToLower(platform), strings.ReplaceAll(p.Sheet, " ", "_"), strings.ReplaceAll(p.Range, ":", "_"))
+}
+
+// UseLibreOffice reports whether this platform should be processed by the
+// LibreOffice parser service rather than DuckDB.
+func (p PlatformConfig) UseLibreOffice() bool {
+	return strings.EqualFold(p.Method, "libreoffice")
 }
 
 func (p ExportConfig) GetTableName(platform string) string {

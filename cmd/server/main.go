@@ -14,6 +14,8 @@ import (
 	"paperless-document-processor/config"
 	"paperless-document-processor/pkg/accounting"
 	"paperless-document-processor/pkg/docai"
+	"paperless-document-processor/pkg/excel"
+	"paperless-document-processor/pkg/libreoffice"
 	"paperless-document-processor/pkg/paperless"
 	"paperless-document-processor/pkg/storage"
 	"paperless-document-processor/pkg/tika"
@@ -22,15 +24,16 @@ import (
 )
 
 type Server struct {
-	cfg              *config.Config
-	db               *storage.DB
-	paperlessClient  *paperless.Client
-	docAIClient      *docai.Client
-	accountingClient *accounting.Client // nil if not configured
-	tikaClient       *tika.Client       // nil if not configured
-	customFields     map[string]int     // Name -> ID
-	tagIDs           map[string]int     // Name -> ID (e.g., "Swiggy" -> 3)
-	duckDBConfigs    map[int]config.PlatformConfig
+	cfg                  *config.Config
+	db                   *storage.DB
+	paperlessClient      *paperless.Client
+	docAIClient          *docai.Client
+	accountingClient     *accounting.Client    // nil if not configured
+	tikaClient           *tika.Client          // nil if not configured
+	libreOfficeClient    *libreoffice.Client   // nil if not configured
+	customFields         map[string]int        // Name -> ID
+	tagIDs               map[string]int        // Name -> ID (e.g., "Swiggy" -> 3)
+	duckDBConfigs        map[int]config.PlatformConfig
 }
 
 type BillRequest struct {
@@ -97,16 +100,26 @@ func main() {
 		slog.Info("Accounting integration disabled (ACCOUNTING_URL not set)")
 	}
 
+	// Init LibreOffice parser client (optional)
+	var loClient *libreoffice.Client
+	if cfg.LibreOfficeURL != "" {
+		loClient = libreoffice.NewClient(cfg.LibreOfficeURL, cfg.LibreOfficeDataPath)
+		slog.Info("LibreOffice parser integration configured", "url", cfg.LibreOfficeURL, "data_path", cfg.LibreOfficeDataPath)
+	} else {
+		slog.Info("LibreOffice parser integration disabled (LIBREOFFICE_URL not set)")
+	}
+
 	srv := &Server{
-		cfg:              cfg,
-		db:               db,
-		paperlessClient:  pClient,
-		docAIClient:      dClient,
-		accountingClient: acClient,
-		tikaClient:       tika.NewClient(cfg.TikaURL),
-		customFields:     make(map[string]int),
-		tagIDs:           make(map[string]int),
-		duckDBConfigs:    make(map[int]config.PlatformConfig),
+		cfg:               cfg,
+		db:                db,
+		paperlessClient:   pClient,
+		docAIClient:       dClient,
+		accountingClient:  acClient,
+		tikaClient:        tika.NewClient(cfg.TikaURL),
+		libreOfficeClient: loClient,
+		customFields:      make(map[string]int),
+		tagIDs:            make(map[string]int),
+		duckDBConfigs:     make(map[int]config.PlatformConfig),
 	}
 
 	// 4. Fetch Custom Fields (Retry policy could be added)
@@ -510,11 +523,86 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 	filePath := fmt.Sprintf("/app/media/%s", filename)
 
 	if (strings.HasSuffix(strings.ToLower(filename), ".xlsx") || strings.HasSuffix(strings.ToLower(filename), ".xls")) && platform != "" {
-		slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
+		if option.UseLibreOffice() {
+			if s.libreOfficeClient == nil || s.cfg == nil || s.cfg.LibreOfficeURL == "" {
+				slog.Error("LibreOffice import method requested but LIBREOFFICE_URL is not configured", "document_id", docID)
+				return
+			}
+			slog.Info("Excel file detected in payout, storing via LibreOffice parser", "path", filename, "platform", platform)
 
-		if err := s.db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
-			slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
-			return
+			// resultRowCounts tracks the number of data rows loaded for each
+			// import config so that subsequent configs with RelativeRange can
+			// compute their start row correctly.
+			resultRowCounts := make([]int, len(option.ImportConfigs))
+
+			for i, importConfig := range option.ImportConfigs {
+				// Resolve relative range if configured.
+				if importConfig.RelativeRange.RelativeConfigIndex > 0 {
+					refIdx := importConfig.RelativeRange.RelativeConfigIndex
+					if refIdx >= i {
+						slog.Error("LibreOffice relative range: RelativeConfigIndex must reference an earlier config", "document_id", docID, "config_index", i, "relative_config_index", refIdx)
+						return
+					}
+					relativeOption := option.ImportConfigs[refIdx]
+					refRowCount := resultRowCounts[refIdx]
+					// Mirror the DuckDB GetRangeEnd row-count adjustment:
+					// decrement only when the referenced config explicitly sets
+					// header=false.
+					if relativeOption.Header != nil && !*relativeOption.Header {
+						refRowCount--
+					}
+					// If the referenced config had a footer row, that row is
+					// physically present in the spreadsheet even though it was
+					// stripped from the loaded data.  Add it back so the computed
+					// start row accounts for the full physical extent of the table.
+					if relativeOption.Footer != nil && *relativeOption.Footer {
+						refRowCount++
+					}
+					if refRowCount < 0 {
+						refRowCount = 0
+					}
+					refRange, err := excel.NewRange(relativeOption.Range)
+					if err != nil {
+						slog.Error("LibreOffice relative range: failed to parse referenced range", "document_id", docID, "range", relativeOption.Range, "error", err)
+						return
+					}
+					// Build the new range using the referenced config's columns
+					// but with a computed start row.
+					refRange.Start.Row = refRange.Start.Row + refRowCount + importConfig.RelativeRange.RowsOffset
+					importConfig.Range = refRange.String()
+					slog.Debug("LibreOffice relative range resolved", "config_index", i, "computed_range", importConfig.Range)
+				}
+
+				hasHeader := importConfig.Header == nil || *importConfig.Header
+				stopAtEmpty := importConfig.StopAtEmpty != nil && *importConfig.StopAtEmpty
+				result, err := s.libreOfficeClient.Parse(filename, importConfig.Sheet, importConfig.Range, hasHeader, stopAtEmpty)
+				if err != nil {
+					slog.Error("LibreOffice parse failed", "document_id", docID, "sheet", importConfig.Sheet, "error", err)
+					return
+				}
+
+				// Drop the last row when the import config declares a footer
+				// row (i.e. a totals/summary row appended by Excel).
+				if importConfig.Footer != nil && *importConfig.Footer && len(result.Rows) > 0 {
+					slog.Debug("LibreOffice footer row dropped", "table", importConfig.GetTableName(platform), "rows_before", len(result.Rows))
+					result.Rows = result.Rows[:len(result.Rows)-1]
+				}
+
+				resultRowCounts[i] = len(result.Rows)
+
+				tableName := importConfig.GetTableName(platform)
+				if err := s.db.LoadRowsIntoTable(docID, tableName, result); err != nil {
+					slog.Error("Failed to load LibreOffice rows into table", "document_id", docID, "table", tableName, "error", err)
+					return
+				}
+			}
+		} else {
+			slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
+
+			if err := s.db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
+				slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
+				return
+			}
 		}
 
 		payoutInput, err := s.db.GetPlatformExcelRows(docID, platform, option)
