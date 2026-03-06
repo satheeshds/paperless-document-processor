@@ -301,7 +301,7 @@ func marshalOrderedRows(rows []map[string]interface{}, headers []string) ([]byte
 func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.ParseResult) error {
 	if result == nil || len(result.Rows) == 0 {
 		slog.Warn("LoadRowsIntoTable: no rows to load", "table", tableName, "docID", docID)
-		return fmt.Errorf("LoadRowsIntoTable: no rows to load for table %s (docID=%d)", tableName, docID)
+		return nil
 	}
 
 	// Serialize rows to a temporary JSON file so DuckDB can read them via
