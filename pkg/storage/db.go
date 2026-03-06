@@ -17,6 +17,7 @@ import (
 
 	"github.com/duckdb/duckdb-go/v2"
 	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/go-viper/mapstructure/v2"
 )
 
 type DB struct {
@@ -233,7 +234,7 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 
 // GetPlatformExcelRows retrieves the previously stored Excel rows from the platform table.
 func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (accounting.PayoutInput, error) {
-	var payoutInput duckdb.Composite[accounting.PayoutInput]
+	var payoutInput accounting.PayoutInput
 	for _, exportConfig := range options.ExportConfigs {
 		if exportConfig.ReaderConfigs == nil || len(exportConfig.ReaderConfigs) == 0 {
 			continue
@@ -248,10 +249,20 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 		}
 		rows.Scan(&jsonMap)
 		slog.Debug("Retrieved platform table", "rows", jsonMap.Get())
-		payoutInput.Scan(jsonMap.Get())
+		dc := &mapstructure.DecoderConfig{
+			Result:           &payoutInput,
+			WeaklyTypedInput: true,
+		}
+		decoder, err := mapstructure.NewDecoder(dc)
+		if err != nil {
+			return accounting.PayoutInput{}, fmt.Errorf("failed to create mapstructure decoder: %w", err)
+		}
+		if err := decoder.Decode(jsonMap.Get()); err != nil {
+			slog.Warn("GetPlatformExcelRows: partial decode error (some fields may be zero)", "table", tableName, "err", err)
+		}
 	}
-	slog.Debug("Constructed payout input", "rows", payoutInput.Get())
-	return payoutInput.Get(), nil
+	slog.Debug("Constructed payout input", "rows", payoutInput)
+	return payoutInput, nil
 }
 
 // marshalOrderedRows encodes rows to JSON with object keys written in the order
