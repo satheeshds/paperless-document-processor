@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -232,6 +234,42 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 	return excel.Range{}, nil
 }
 
+// bigNumericDecodeHook converts *big.Int and *big.Float returned by the DuckDB
+// driver into the plain Go numeric type expected by the mapstructure target field.
+func bigNumericDecodeHook(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+	switch v := data.(type) {
+	case *big.Int:
+		if v == nil {
+			return data, nil
+		}
+		switch to.Kind() { //nolint:exhaustive
+		case reflect.Float32, reflect.Float64:
+			f, _ := new(big.Float).SetInt(v).Float64()
+			return f, nil
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return v.Int64(), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return v.Uint64(), nil
+		}
+	case *big.Float:
+		if v == nil {
+			return data, nil
+		}
+		switch to.Kind() { //nolint:exhaustive
+		case reflect.Float32, reflect.Float64:
+			f, _ := v.Float64()
+			return f, nil
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			i, _ := v.Int64()
+			return i, nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			u, _ := v.Uint64()
+			return u, nil
+		}
+	}
+	return data, nil
+}
+
 // GetPlatformExcelRows retrieves the previously stored Excel rows from the platform table.
 func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (accounting.PayoutInput, error) {
 	var payoutInput accounting.PayoutInput
@@ -252,6 +290,10 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 		dc := &mapstructure.DecoderConfig{
 			Result:           &payoutInput,
 			WeaklyTypedInput: true,
+			DecodeHook: mapstructure.ComposeDecodeHookFunc(
+				bigNumericDecodeHook,
+				mapstructure.StringToBasicTypeHookFunc(),
+			),
 		}
 		decoder, err := mapstructure.NewDecoder(dc)
 		if err != nil {
