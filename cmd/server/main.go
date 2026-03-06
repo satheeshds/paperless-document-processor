@@ -551,6 +551,13 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 					if relativeOption.Header != nil && !*relativeOption.Header {
 						refRowCount--
 					}
+					// If the referenced config had a footer row, that row is
+					// physically present in the spreadsheet even though it was
+					// stripped from the loaded data.  Add it back so the computed
+					// start row accounts for the full physical extent of the table.
+					if relativeOption.Footer != nil && *relativeOption.Footer {
+						refRowCount++
+					}
 					if refRowCount < 0 {
 						refRowCount = 0
 					}
