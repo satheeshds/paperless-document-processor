@@ -38,21 +38,44 @@ type ProcessedDocument struct {
 }
 
 func InitDB(filepath string) (*DB, error) {
-	slog.Info("Initializing database", "path", filepath)
-	db, err := sql.Open("duckdb", filepath)
+	slog.Info("Initializing DuckLake catalog", "path", filepath)
+
+	// Open an in-memory DuckDB connection as the gateway for DuckLake.
+	db, err := sql.Open("duckdb", "")
 	if err != nil {
-		slog.Error("Failed to open database", "path", filepath, "error", err)
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		slog.Error("Failed to open DuckDB connection", "error", err)
+		return nil, fmt.Errorf("failed to open DuckDB connection: %w", err)
 	}
+
+	// Limit to a single connection so that session-level settings
+	// (ATTACH / USE) are shared across all db.Exec/Query calls.
+	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
-		slog.Error("Failed to ping database", "path", filepath, "error", err)
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+		slog.Error("Failed to ping DuckDB", "error", err)
+		return nil, fmt.Errorf("failed to ping DuckDB: %w", err)
 	}
 
-	// Install and load excel extension
-	_, err = db.Exec("INSTALL excel; LOAD excel;")
-	if err != nil {
+	// Install and load the ducklake extension.
+	if _, err = db.Exec("INSTALL ducklake; LOAD ducklake;"); err != nil {
+		slog.Error("Failed to install/load ducklake extension", "error", err)
+		return nil, fmt.Errorf("failed to load ducklake extension: %w", err)
+	}
+
+	// Attach the DuckLake catalog (creates it on first use).
+	if _, err = db.Exec(fmt.Sprintf("ATTACH 'ducklake:%s' AS lake;", filepath)); err != nil {
+		slog.Error("Failed to attach DuckLake catalog", "path", filepath, "error", err)
+		return nil, fmt.Errorf("failed to attach DuckLake catalog: %w", err)
+	}
+
+	// Set DuckLake as the default catalog for all subsequent operations.
+	if _, err = db.Exec("USE lake;"); err != nil {
+		slog.Error("Failed to set DuckLake as default catalog", "error", err)
+		return nil, fmt.Errorf("failed to use DuckLake catalog: %w", err)
+	}
+
+	// Install and load excel extension for read_xlsx support.
+	if _, err = db.Exec("INSTALL excel; LOAD excel;"); err != nil {
 		slog.Warn("Failed to install/load excel extension", "error", err)
 	}
 
@@ -61,58 +84,36 @@ func InitDB(filepath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
-	slog.Info("Database initialized successfully")
+	slog.Info("DuckLake catalog initialized successfully")
 	return &DB{Conn: db}, nil
 }
 
 func createTables(db *sql.DB) error {
-	// 1. Try to create the sequence (Native DuckDB path)
-	_, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_processed_documents_id;")
+	// DuckLake uses standard DuckDB SQL for table definitions.
+	// The table has no surrogate primary key because the Go layer never queries
+	// by row ID; paperless_id is the natural lookup key and is indexed below.
+	query := `
+	CREATE TABLE IF NOT EXISTS processed_documents (
+		paperless_id INTEGER NOT NULL,
+		filename TEXT,
+		supplier TEXT,
+		date TEXT,
+		total_amount REAL,
+		raw_ocr_data TEXT,
+		extracted_text TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
 
-	var query string
-	if err == nil {
-		// Success! This is a native DuckDB database.
-		slog.Debug("Creating tables using native DuckDB sequence")
-		query = `
-		CREATE TABLE IF NOT EXISTS processed_documents (
-			id INTEGER PRIMARY KEY DEFAULT nextval('seq_processed_documents_id'),
-			paperless_id INTEGER NOT NULL,
-			filename TEXT,
-			supplier TEXT,
-			date TEXT,
-			total_amount REAL,
-			raw_ocr_data TEXT,
-			extracted_text TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`
-	} else if strings.Contains(err.Error(), "SQLite") || strings.Contains(strings.ToLower(err.Error()), "sqlite") {
-		// This is a SQLite file being opened by DuckDB.
-		slog.Warn("Database identified as SQLite, using SQLite-compatible schema")
-		query = `
-		CREATE TABLE IF NOT EXISTS processed_documents (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			paperless_id INTEGER NOT NULL,
-			filename TEXT,
-			supplier TEXT,
-			date TEXT,
-			total_amount REAL,
-			raw_ocr_data TEXT,
-			extracted_text TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`
-	} else {
-		// Some other error
-		return fmt.Errorf("failed to initialize sequence: %w", err)
-	}
-
-	_, err = db.Exec(query)
-	if err != nil {
+	if _, err := db.Exec(query); err != nil {
 		return fmt.Errorf("failed to create processed_documents table: %w", err)
 	}
 
-	// Create index
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_paperless_id ON processed_documents(paperless_id);`)
-	return err
+	// Create index for query performance.
+	// DuckLake may use file statistics instead of traditional indexes; treat failure as a warning.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_paperless_id ON processed_documents(paperless_id);`); err != nil {
+		slog.Warn("Failed to create index on processed_documents; queries on paperless_id may be slower", "error", err)
+	}
+	return nil
 }
 
 func (d *DB) SaveDocument(doc *ProcessedDocument) error {
@@ -143,9 +144,9 @@ func (d *DB) Close() error {
 	return d.Conn.Close()
 }
 
-// ProcessPlatformExcel reads an Excel file using DuckDB and stores it into a platform-specific table.
+// ProcessPlatformExcel reads an Excel file using DuckLake and stores it into a platform-specific table.
 func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, options config.PlatformConfig) error {
-	slog.Info("Storing Excel file via DuckDB into platform table", "platform", platform, "path", filePath)
+	slog.Info("Storing Excel file via DuckLake into platform table", "platform", platform, "path", filePath)
 
 	for _, importConfig := range options.ImportConfigs {
 
@@ -344,10 +345,10 @@ func marshalOrderedRows(rows []map[string]interface{}, headers []string) ([]byte
 	return buf.Bytes(), nil
 }
 
-// LoadRowsIntoTable creates (if necessary) a platform-specific DuckDB table from
+// LoadRowsIntoTable creates (if necessary) a platform-specific DuckLake table from
 // rows returned by the LibreOffice parser service and bulk-inserts the rows
 // using DuckDB's read_json_auto table function — the same approach used for
-// read_xlsx in the DuckDB path.
+// read_xlsx in the DuckLake path.
 //
 // All column types are inferred by DuckDB from the JSON data.  Export-config
 // expressions should use TRY_CAST for numeric conversions where needed.
@@ -358,7 +359,7 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	}
 
 	// Serialize rows to a temporary JSON file so DuckDB can read them via
-	// read_json_auto — identical approach to how the DuckDB path uses read_xlsx.
+	// read_json_auto — identical approach to how the DuckLake path uses read_xlsx.
 	// Use marshalOrderedRows when headers are available so that read_json_auto
 	// creates DuckDB table columns in the original xlsx column sequence.
 	var jsonBytes []byte

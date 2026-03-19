@@ -29,7 +29,7 @@ type Config struct {
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
 
-	// LibreOffice parser service (optional, used for payout XLSX when DuckDB fails)
+	// LibreOffice parser service (optional, used for payout XLSX when DuckLake fails)
 	LibreOfficeURL      string
 	LibreOfficeDataPath string
 }
@@ -40,7 +40,7 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Port:                  getEnv("PORT", "80"),
-		DBPath:                getEnv("DB_PATH", "data/duck.db"),
+		DBPath:                getEnv("DB_PATH", "data/duck.ducklake"),
 		PaperlessURL:          os.Getenv("PAPERLESS_URL"),
 		PaperlessToken:        os.Getenv("PAPERLESS_TOKEN"),
 		GoogleProjectID:       os.Getenv("GOOGLE_CLOUD_PROJECT"),
@@ -104,7 +104,8 @@ type PayoutConfigs struct {
 
 type PlatformConfig struct {
 	// Method controls which backend reads the Excel file for this platform.
-	// Accepted values: "duckdb" (default) or "libreoffice".
+	// Accepted values: "ducklake" (default), "duckdb" (alias for "ducklake", kept for backward compatibility),
+	// or "libreoffice".
 	Method        string         `json:"method,omitempty"`
 	ImportConfigs []ImportConfig `json:"import_configs,omitempty"`
 	ExportConfigs []ExportConfig `json:"export_configs,omitempty"`
@@ -121,7 +122,7 @@ type ImportConfig struct {
 	// Footer indicates that the last row returned by the service is a totals /
 	// summary footer row that should be excluded from the loaded data.  When
 	// true, the final row of each parsed result is dropped before it is
-	// inserted into DuckDB.
+	// inserted into DuckLake.
 	Footer *bool `json:"footer,omitempty"`
 }
 
@@ -185,7 +186,7 @@ func (p ImportConfig) GetTableName(platform string) string {
 }
 
 // UseLibreOffice reports whether this platform should be processed by the
-// LibreOffice parser service rather than DuckDB.
+// LibreOffice parser service rather than DuckLake.
 func (p PlatformConfig) UseLibreOffice() bool {
 	return strings.EqualFold(p.Method, "libreoffice")
 }
