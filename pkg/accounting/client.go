@@ -38,14 +38,22 @@ type Bill struct {
 }
 
 type BillInput struct {
-	ContactID  *int   `json:"contact_id"`
-	BillNumber string `json:"bill_number"`
-	IssueDate  string `json:"issue_date,omitempty"`
-	DueDate    string `json:"due_date,omitempty"`
-	Amount     int    `json:"amount"` // in paise
-	Status     string `json:"status"`
-	FileURL    string `json:"file_url,omitempty"`
-	Notes      string `json:"notes,omitempty"`
+	ContactID  *int           `json:"contact_id"`
+	BillNumber string         `json:"bill_number"`
+	IssueDate  string         `json:"issue_date,omitempty"`
+	DueDate    string         `json:"due_date,omitempty"`
+	Amount     int            `json:"amount"` // in paise
+	Status     string         `json:"status"`
+	FileURL    string         `json:"file_url,omitempty"`
+	Notes      string         `json:"notes,omitempty"`
+	LineItems  []BillLineItem `json:"line_items,omitempty"`
+}
+
+type BillLineItem struct {
+	Description string  `json:"description,omitempty"`
+	Quantity    float64 `json:"quantity,omitempty"`
+	UnitPrice   int     `json:"unit_price,omitempty"`
+	Amount      int     `json:"amount,omitempty"`
 }
 
 type Platform string

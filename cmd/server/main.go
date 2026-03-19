@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -24,16 +25,16 @@ import (
 )
 
 type Server struct {
-	cfg                  *config.Config
-	db                   *storage.DB
-	paperlessClient      *paperless.Client
-	docAIClient          *docai.Client
-	accountingClient     *accounting.Client    // nil if not configured
-	tikaClient           *tika.Client          // nil if not configured
-	libreOfficeClient    *libreoffice.Client   // nil if not configured
-	customFields         map[string]int        // Name -> ID
-	tagIDs               map[string]int        // Name -> ID (e.g., "Swiggy" -> 3)
-	duckDBConfigs        map[int]config.PlatformConfig
+	cfg               *config.Config
+	db                *storage.DB
+	paperlessClient   *paperless.Client
+	docAIClient       *docai.Client
+	accountingClient  *accounting.Client  // nil if not configured
+	tikaClient        *tika.Client        // nil if not configured
+	libreOfficeClient *libreoffice.Client // nil if not configured
+	customFields      map[string]int      // Name -> ID
+	tagIDs            map[string]int      // Name -> ID (e.g., "Swiggy" -> 3)
+	duckDBConfigs     map[int]config.PlatformConfig
 }
 
 type BillRequest struct {
@@ -431,6 +432,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		Status:     "draft",
 		FileURL:    req.DocURL,
 		Notes:      fmt.Sprintf("Auto-created from Paperless document #%d (%s)", docID, doc.OriginalFileName),
+		LineItems:  buildBillLineItems(extracted.LineItems),
 	}
 
 	billID, err := s.accountingClient.CreateBill(billInput)
@@ -440,6 +442,44 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 	}
 
 	slog.Info("Local accounting bill created", "document_id", docID, "accounting_bill_id", billID)
+}
+
+func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineItem {
+	lineItems := make([]accounting.BillLineItem, 0, len(extractedItems))
+
+	for _, item := range extractedItems {
+		lineItem := accounting.BillLineItem{
+			Description: strings.TrimSpace(item.Description),
+			Quantity:    parseDecimal(item.Quantity),
+			UnitPrice:   decimalToPaise(item.UnitPrice),
+			Amount:      decimalToPaise(item.Amount),
+		}
+		if lineItem.Amount == 0 && lineItem.Quantity > 0 && lineItem.UnitPrice > 0 {
+			lineItem.Amount = int(math.Round(lineItem.Quantity * float64(lineItem.UnitPrice)))
+		}
+		if lineItem.Description == "" && lineItem.Quantity == 0 && lineItem.UnitPrice == 0 && lineItem.Amount == 0 {
+			continue
+		}
+		lineItems = append(lineItems, lineItem)
+	}
+
+	return lineItems
+}
+
+func decimalToPaise(raw string) int {
+	value := parseDecimal(raw)
+	if value == 0 {
+		return 0
+	}
+	return int(math.Round(value * 100))
+}
+
+func parseDecimal(raw string) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {

@@ -75,6 +75,17 @@ func TestCreateBill(t *testing.T) {
 			if input.Amount != 10050 {
 				t.Errorf("Expected amount 10050, got %d", input.Amount)
 			}
+			if len(input.LineItems) != 1 {
+				t.Errorf("Expected 1 line item, got %d", len(input.LineItems))
+			}
+			if len(input.LineItems) == 1 {
+				if input.LineItems[0].Description != "Consulting services" {
+					t.Errorf("Expected line item description Consulting services, got %s", input.LineItems[0].Description)
+				}
+				if input.LineItems[0].Amount != 10050 {
+					t.Errorf("Expected line item amount 10050, got %d", input.LineItems[0].Amount)
+				}
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(Response[Bill]{Data: Bill{ID: 30, Amount: 10050}})
@@ -90,6 +101,14 @@ func TestCreateBill(t *testing.T) {
 		ContactID:  &contactID,
 		BillNumber: "BILL-001",
 		Amount:     10050,
+		LineItems: []BillLineItem{
+			{
+				Description: "Consulting services",
+				Quantity:    2,
+				UnitPrice:   5025,
+				Amount:      10050,
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
@@ -105,7 +124,7 @@ func TestCreatePayout(t *testing.T) {
 			var input PayoutInput
 			json.NewDecoder(r.Body).Decode(&input)
 			if input.FinalPayoutAmt != 340000 {
-				t.Errorf("Expected amount 340000, got %d", input.FinalPayoutAmt)
+				t.Errorf("Expected amount 340000, got %v", input.FinalPayoutAmt)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
