@@ -3,7 +3,20 @@
 ## Goal
 Automatically ship documents that arrive in Paperless to Google Cloud for continuous Document AI training without manual uploads. The flow must be reliable, auditable, and able to evolve as new processor versions are trained.
 
-## Components
+## Simple current approach (requested)
+- **Goal now**: Just drop every new Paperless document into a GCS bucket using a predictable folder structure; no Pub/Sub, datasets, or training automation yet.
+- **Suggested bucket**: `gs://paperless-training-raw`
+- **Folder pattern**: `gs://paperless-training-raw/{yyyy}/{mm}/{dd}/{paperless_id}/{original_file_name}`
+  - Example: `gs://paperless-training-raw/2026/03/20/1234/invoice-1234.pdf`
+  - Place any sidecar JSON (e.g., tags/custom fields) as `metadata.json` in the same folder.
+- **Rough steps** (service side):
+  1) On webhook, download the document from Paperless.
+  2) Detect MIME type; convert to PDF if needed (reuse LibreOffice/Tika if available).
+  3) Upload to the bucket path above (idempotent overwrite OK).
+  4) Optionally upload `metadata.json` containing Paperless tags/correspondent to aid later labeling.
+- This keeps the path forward for later automation while satisfying the immediate need to stage files in GCS.
+
+## Components (future scalable design)
 - **Paperless webhook** – already configured to call the Go service when a document is added.
 - **Document processor service (this repo)** – on webhook receipt, publishes a small message to Pub/Sub instead of synchronously handling training uploads.
 - **Pub/Sub topic `docai-training-ingest`** – decouples Paperless events from training ingestion; messages carry document ID, filename, tags/labels, and a signed download URL.
@@ -45,4 +58,3 @@ Automatically ship documents that arrive in Paperless to Google Cloud for contin
 1) Add a Pub/Sub publish step on webhook receipt (non-blocking) with doc metadata.  
 2) Emit a signed download URL (or temporary token) so Cloud Run job can fetch the file without Paperless credentials baked into the job.  
 3) Keep the existing synchronous processing path for inference; training ingestion is side-channel and does not affect user latency.
-

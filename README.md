@@ -81,4 +81,6 @@ Configure a **Webhook** in Paperless-ngx to trigger this service when a document
 
 ## Training pipeline architecture (ID-35)
 
-For the automatic training data flow (Paperless → GCS → Document AI Dataset → new processor versions), see [docs/training-pipeline.md](docs/training-pipeline.md). It outlines the Pub/Sub-based ingestion, Cloud Run/Functions import step, Dataset API usage, and scheduled training/promotion workflow.
+For the training data flow (Paperless → GCS → Document AI), see [docs/training-pipeline.md](docs/training-pipeline.md). It now includes:
+- **Current simple path**: directly upload each Paperless document to a dated folder in a GCS bucket.
+- **Scalable path**: Pub/Sub-based ingestion, Cloud Run/Functions import, Dataset API, and scheduled training/promotion.
