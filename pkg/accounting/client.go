@@ -52,6 +52,7 @@ type BillInput struct {
 type BillLineItem struct {
 	Description string  `json:"description,omitempty"`
 	Quantity    float64 `json:"quantity,omitempty"`
+	Unit        string  `json:"unit,omitempty"`
 	UnitPrice   int     `json:"unit_price,omitempty"`
 	Amount      int     `json:"amount,omitempty"`
 }

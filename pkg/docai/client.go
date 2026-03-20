@@ -31,6 +31,7 @@ type ExtractedData struct {
 type LineItem struct {
 	Description string
 	Quantity    string
+	Unit        string
 	UnitPrice   string
 	Amount      string
 }
@@ -285,6 +286,8 @@ func extractLineItem(entity *documentaipb.Document_Entity) (LineItem, bool) {
 			item.Description = val
 		case "quantity":
 			item.Quantity = val
+		case "unit":
+			item.Unit = val
 		case "unit_price":
 			item.UnitPrice = val
 		case "amount":
@@ -292,7 +295,7 @@ func extractLineItem(entity *documentaipb.Document_Entity) (LineItem, bool) {
 		}
 	}
 
-	return item, item.Description != "" || item.Quantity != "" || item.UnitPrice != "" || item.Amount != ""
+	return item, item.Description != "" || item.Quantity != "" || item.Unit != "" || item.UnitPrice != "" || item.Amount != ""
 }
 
 func normalizeLineItemField(fieldType string) string {
@@ -309,6 +312,8 @@ func normalizeLineItemField(fieldType string) string {
 		return "description"
 	case "quantity", "qty":
 		return "quantity"
+	case "unit":
+		return "unit"
 	case "unit_price", "price", "unit_cost":
 		return "unit_price"
 	case "amount", "line_item_amount", "total_price", "total_amount":

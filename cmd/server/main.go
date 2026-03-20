@@ -451,13 +451,14 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 		lineItem := accounting.BillLineItem{
 			Description: strings.TrimSpace(item.Description),
 			Quantity:    parseDecimal(item.Quantity),
+			Unit:        strings.TrimSpace(item.Unit),
 			UnitPrice:   decimalToPaise(item.UnitPrice),
 			Amount:      decimalToPaise(item.Amount),
 		}
 		if lineItem.Amount == 0 && lineItem.Quantity > 0 && lineItem.UnitPrice > 0 {
 			lineItem.Amount = int(math.Round(lineItem.Quantity * float64(lineItem.UnitPrice)))
 		}
-		if lineItem.Description == "" && lineItem.Quantity == 0 && lineItem.UnitPrice == 0 && lineItem.Amount == 0 {
+		if lineItem.Description == "" && lineItem.Quantity == 0 && lineItem.Unit == "" && lineItem.UnitPrice == 0 && lineItem.Amount == 0 {
 			continue
 		}
 		lineItems = append(lineItems, lineItem)

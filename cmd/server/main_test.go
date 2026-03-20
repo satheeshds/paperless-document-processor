@@ -48,6 +48,7 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 			{
 				Description: "Consulting services",
 				Quantity:    "2",
+				Unit:        "hours",
 				UnitPrice:   "50.25",
 				Amount:      "100.50",
 			},
@@ -67,6 +68,9 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	}
 	if item.Quantity != 2 {
 		t.Errorf("expected quantity 2, got %v", item.Quantity)
+	}
+	if item.Unit != "hours" {
+		t.Errorf("expected unit hours, got %s", item.Unit)
 	}
 	if item.UnitPrice != 5025 {
 		t.Errorf("expected unit price 5025, got %d", item.UnitPrice)

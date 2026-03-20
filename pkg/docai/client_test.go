@@ -85,6 +85,7 @@ func TestExtractData_LineItems(t *testing.T) {
 				Properties: []*documentaipb.Document_Entity{
 					createLineItemProperty("description", "Consulting services", "Consulting services", nil),
 					createLineItemProperty("quantity", "2", "2", &documentaipb.Document_Entity_NormalizedValue{Text: "2"}),
+					createLineItemProperty("unit", "hours", "hours", nil),
 					createLineItemProperty("unit_price", "$50.25", "$50.25", &documentaipb.Document_Entity_NormalizedValue{Text: "50.25"}),
 					createLineItemProperty("amount", "$100.50", "$100.50", &documentaipb.Document_Entity_NormalizedValue{Text: "100.50"}),
 				},
@@ -105,6 +106,9 @@ func TestExtractData_LineItems(t *testing.T) {
 	}
 	if item.Quantity != "2" {
 		t.Errorf("Expected quantity '2', got '%s'", item.Quantity)
+	}
+	if item.Unit != "hours" {
+		t.Errorf("Expected unit 'hours', got '%s'", item.Unit)
 	}
 	if item.UnitPrice != "50.25" {
 		t.Errorf("Expected unit price '50.25', got '%s'", item.UnitPrice)

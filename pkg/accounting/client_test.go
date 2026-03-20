@@ -82,6 +82,9 @@ func TestCreateBill(t *testing.T) {
 				if input.LineItems[0].Description != "Consulting services" {
 					t.Errorf("Expected line item description Consulting services, got %s", input.LineItems[0].Description)
 				}
+				if input.LineItems[0].Unit != "hours" {
+					t.Errorf("Expected line item unit hours, got %s", input.LineItems[0].Unit)
+				}
 				if input.LineItems[0].Amount != 10050 {
 					t.Errorf("Expected line item amount 10050, got %d", input.LineItems[0].Amount)
 				}
@@ -105,6 +108,7 @@ func TestCreateBill(t *testing.T) {
 			{
 				Description: "Consulting services",
 				Quantity:    2,
+				Unit:        "hours",
 				UnitPrice:   5025,
 				Amount:      10050,
 			},
