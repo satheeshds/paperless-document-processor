@@ -11,13 +11,13 @@ import (
 	"paperless-document-processor/pkg/paperless"
 )
 
-type receivedInvoiceInput struct {
-	InvoiceNumber string                    `json:"invoice_number"`
-	Amount        int                       `json:"amount"`
-	Items         []receivedInvoiceLineItem `json:"items"`
+type receivedBillInput struct {
+	BillNumber string                 `json:"bill_number"`
+	Amount     int                    `json:"amount"`
+	LineItems  []receivedBillLineItem `json:"line_items"`
 }
 
-type receivedInvoiceLineItem struct {
+type receivedBillLineItem struct {
 	Description string  `json:"description"`
 	Quantity    float64 `json:"quantity"`
 	Unit        string  `json:"unit"`
@@ -26,7 +26,7 @@ type receivedInvoiceLineItem struct {
 }
 
 func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
-	var receivedInvoice receivedInvoiceInput
+	var receivedBill receivedBillInput
 	errCh := make(chan error, 2)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,16 +36,16 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 			json.NewEncoder(w).Encode(accounting.Response[[]accounting.Contact]{
 				Data: []accounting.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/invoices":
-			if err := json.NewDecoder(r.Body).Decode(&receivedInvoice); err != nil {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bills":
+			if err := json.NewDecoder(r.Body).Decode(&receivedBill); err != nil {
 				errCh <- err
-				http.Error(w, "failed to decode invoice input", http.StatusInternalServerError)
+				http.Error(w, "failed to decode bill input", http.StatusInternalServerError)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(accounting.Response[map[string]int]{
-				Data: map[string]int{"id": 30},
+			json.NewEncoder(w).Encode(accounting.Response[accounting.Bill]{
+				Data: accounting.Bill{ID: 30, Amount: receivedBill.Amount},
 			})
 		default:
 			errCh <- &unexpectedRequestError{method: r.Method, path: r.URL.Path}
@@ -80,14 +80,14 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 		}
 	}
 
-	if receivedInvoice.InvoiceNumber != "INV-123" {
-		t.Fatalf("expected invoice number INV-123, got %s", receivedInvoice.InvoiceNumber)
+	if receivedBill.BillNumber != "INV-123" {
+		t.Fatalf("expected bill number INV-123, got %s", receivedBill.BillNumber)
 	}
-	if len(receivedInvoice.Items) != 1 {
-		t.Fatalf("expected 1 line item, got %d", len(receivedInvoice.Items))
+	if len(receivedBill.LineItems) != 1 {
+		t.Fatalf("expected 1 line item, got %d", len(receivedBill.LineItems))
 	}
 
-	item := receivedInvoice.Items[0]
+	item := receivedBill.LineItems[0]
 	if item.Description != "Consulting services" {
 		t.Errorf("expected description Consulting services, got %s", item.Description)
 	}
