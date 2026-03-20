@@ -57,6 +57,30 @@ type BillLineItem struct {
 	Amount      int     `json:"amount,omitempty"`
 }
 
+type invoiceInput struct {
+	ContactID     *int              `json:"contact_id"`
+	InvoiceNumber string            `json:"invoice_number"`
+	IssueDate     string            `json:"issue_date,omitempty"`
+	DueDate       string            `json:"due_date,omitempty"`
+	Amount        int               `json:"amount"`
+	Status        string            `json:"status"`
+	FileURL       string            `json:"file_url,omitempty"`
+	Notes         string            `json:"notes,omitempty"`
+	Items         []invoiceLineItem `json:"items,omitempty"`
+}
+
+type invoiceLineItem struct {
+	Description string  `json:"description,omitempty"`
+	Quantity    float64 `json:"quantity,omitempty"`
+	Unit        string  `json:"unit,omitempty"`
+	UnitPrice   int     `json:"unit_price,omitempty"`
+	Amount      int     `json:"amount,omitempty"`
+}
+
+type createRecord struct {
+	ID int `json:"id"`
+}
+
 type Platform string
 
 const (
@@ -204,7 +228,7 @@ func (c *Client) GetOrCreateVendor(name string) (int, error) {
 }
 
 func (c *Client) CreateBill(bill BillInput) (int, error) {
-	resp, err := c.request("POST", "bills", bill)
+	resp, err := c.request("POST", "invoices", toInvoiceInput(bill))
 	if err != nil {
 		return 0, err
 	}
@@ -212,15 +236,40 @@ func (c *Client) CreateBill(bill BillInput) (int, error) {
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("failed to create bill: %d %s", resp.StatusCode, string(body))
+		return 0, fmt.Errorf("failed to create invoice: %d %s", resp.StatusCode, string(body))
 	}
 
-	var createResp Response[Bill]
+	var createResp Response[createRecord]
 	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
 		return 0, err
 	}
 
 	return createResp.Data.ID, nil
+}
+
+func toInvoiceInput(bill BillInput) invoiceInput {
+	items := make([]invoiceLineItem, 0, len(bill.LineItems))
+	for _, item := range bill.LineItems {
+		items = append(items, invoiceLineItem{
+			Description: item.Description,
+			Quantity:    item.Quantity,
+			Unit:        item.Unit,
+			UnitPrice:   item.UnitPrice,
+			Amount:      item.Amount,
+		})
+	}
+
+	return invoiceInput{
+		ContactID:     bill.ContactID,
+		InvoiceNumber: bill.BillNumber,
+		IssueDate:     bill.IssueDate,
+		DueDate:       bill.DueDate,
+		Amount:        bill.Amount,
+		Status:        bill.Status,
+		FileURL:       bill.FileURL,
+		Notes:         bill.Notes,
+		Items:         items,
+	}
 }
 
 func (c *Client) CreatePayout(payout PayoutInput) (int, error) {

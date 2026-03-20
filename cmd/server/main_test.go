@@ -11,8 +11,23 @@ import (
 	"paperless-document-processor/pkg/paperless"
 )
 
+type receivedInvoiceInput struct {
+	InvoiceNumber string                    `json:"invoice_number"`
+	Amount        int                       `json:"amount"`
+	Items         []receivedInvoiceLineItem `json:"items"`
+}
+
+type receivedInvoiceLineItem struct {
+	Description string  `json:"description"`
+	Quantity    float64 `json:"quantity"`
+	Unit        string  `json:"unit"`
+	UnitPrice   int     `json:"unit_price"`
+	Amount      int     `json:"amount"`
+}
+
 func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
-	var receivedBill accounting.BillInput
+	var receivedInvoice receivedInvoiceInput
+	errCh := make(chan error, 2)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -21,17 +36,20 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 			json.NewEncoder(w).Encode(accounting.Response[[]accounting.Contact]{
 				Data: []accounting.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bills":
-			if err := json.NewDecoder(r.Body).Decode(&receivedBill); err != nil {
-				t.Fatalf("failed to decode bill input: %v", err)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/invoices":
+			if err := json.NewDecoder(r.Body).Decode(&receivedInvoice); err != nil {
+				errCh <- err
+				http.Error(w, "failed to decode invoice input", http.StatusInternalServerError)
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(accounting.Response[accounting.Bill]{
-				Data: accounting.Bill{ID: 30, Amount: receivedBill.Amount},
+			json.NewEncoder(w).Encode(accounting.Response[map[string]int]{
+				Data: map[string]int{"id": 30},
 			})
 		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			errCh <- &unexpectedRequestError{method: r.Method, path: r.URL.Path}
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -55,14 +73,21 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 		},
 	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/123"})
 
-	if receivedBill.BillNumber != "INV-123" {
-		t.Fatalf("expected bill number INV-123, got %s", receivedBill.BillNumber)
-	}
-	if len(receivedBill.LineItems) != 1 {
-		t.Fatalf("expected 1 line item, got %d", len(receivedBill.LineItems))
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	item := receivedBill.LineItems[0]
+	if receivedInvoice.InvoiceNumber != "INV-123" {
+		t.Fatalf("expected invoice number INV-123, got %s", receivedInvoice.InvoiceNumber)
+	}
+	if len(receivedInvoice.Items) != 1 {
+		t.Fatalf("expected 1 line item, got %d", len(receivedInvoice.Items))
+	}
+
+	item := receivedInvoice.Items[0]
 	if item.Description != "Consulting services" {
 		t.Errorf("expected description Consulting services, got %s", item.Description)
 	}
@@ -78,4 +103,13 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	if item.Amount != 10050 {
 		t.Errorf("expected amount 10050, got %d", item.Amount)
 	}
+}
+
+type unexpectedRequestError struct {
+	method string
+	path   string
+}
+
+func (e *unexpectedRequestError) Error() string {
+	return "unexpected request: " + e.method + " " + e.path
 }
