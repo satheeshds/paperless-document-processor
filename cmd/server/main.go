@@ -476,8 +476,31 @@ func decimalToPaise(raw string) int {
 }
 
 func parseDecimal(raw string) float64 {
-	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return 0
+	}
+
+	// Strip currency symbols and other non-numeric characters, but keep
+	// digits, decimal/thousands separators, and sign. Then treat commas
+	// as thousands separators (remove them) before parsing.
+	var b strings.Builder
+	for _, r := range cleaned {
+		if (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '-' || r == '+' {
+			b.WriteRune(r)
+		}
+	}
+	normalized := strings.ReplaceAll(b.String(), ",", "")
+
+	// Ensure we still have something that looks like a number.
+	if normalized == "" || normalized == "-" || normalized == "+" || normalized == "." {
+		slog.Warn("Failed to parse decimal: no numeric content after normalization", "raw", raw)
+		return 0
+	}
+
+	value, err := strconv.ParseFloat(normalized, 64)
 	if err != nil {
+		slog.Warn("Failed to parse decimal", "raw", raw, "normalized", normalized, "error", err)
 		return 0
 	}
 	return value
