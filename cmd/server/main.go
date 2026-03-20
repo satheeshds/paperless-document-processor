@@ -431,7 +431,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		Status:     "draft",
 		FileURL:    req.DocURL,
 		Notes:      fmt.Sprintf("Auto-created from Paperless document #%d (%s)", docID, doc.OriginalFileName),
-		LineItems:  buildBillLineItems(extracted.LineItems),
+		Items:      buildBillLineItems(extracted.LineItems),
 	}
 
 	billID, err := s.accountingClient.CreateBill(billInput)

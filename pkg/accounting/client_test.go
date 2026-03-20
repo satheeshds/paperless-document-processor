@@ -16,7 +16,7 @@ type recordedBillInput struct {
 	Status     string                 `json:"status"`
 	FileURL    string                 `json:"file_url"`
 	Notes      string                 `json:"notes"`
-	LineItems  []recordedBillLineItem `json:"line_items"`
+	Items      []recordedBillLineItem `json:"items"`
 }
 
 type recordedBillLineItem struct {
@@ -118,18 +118,18 @@ func TestCreateBill(t *testing.T) {
 			if input.BillNumber != "BILL-001" {
 				t.Errorf("Expected bill number BILL-001, got %s", input.BillNumber)
 			}
-			if len(input.LineItems) != 1 {
-				t.Errorf("Expected 1 line item, got %d", len(input.LineItems))
+			if len(input.Items) != 1 {
+				t.Errorf("Expected 1 line item, got %d", len(input.Items))
 			}
-			if len(input.LineItems) == 1 {
-				if input.LineItems[0].Description != "Consulting services" {
-					t.Errorf("Expected line item description Consulting services, got %s", input.LineItems[0].Description)
+			if len(input.Items) == 1 {
+				if input.Items[0].Description != "Consulting services" {
+					t.Errorf("Expected line item description Consulting services, got %s", input.Items[0].Description)
 				}
-				if input.LineItems[0].Unit != "hours" {
-					t.Errorf("Expected line item unit hours, got %s", input.LineItems[0].Unit)
+				if input.Items[0].Unit != "hours" {
+					t.Errorf("Expected line item unit hours, got %s", input.Items[0].Unit)
 				}
-				if input.LineItems[0].Amount != 10050 {
-					t.Errorf("Expected line item amount 10050, got %d", input.LineItems[0].Amount)
+				if input.Items[0].Amount != 10050 {
+					t.Errorf("Expected line item amount 10050, got %d", input.Items[0].Amount)
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -147,7 +147,7 @@ func TestCreateBill(t *testing.T) {
 		ContactID:  &contactID,
 		BillNumber: "BILL-001",
 		Amount:     10050,
-		LineItems: []BillLineItem{
+		Items: []BillLineItem{
 			{
 				Description: "Consulting services",
 				Quantity:    2,

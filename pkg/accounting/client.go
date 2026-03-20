@@ -46,7 +46,7 @@ type BillInput struct {
 	Status     string         `json:"status"`
 	FileURL    string         `json:"file_url,omitempty"`
 	Notes      string         `json:"notes,omitempty"`
-	LineItems  []BillLineItem `json:"line_items,omitempty"`
+	Items      []BillLineItem `json:"items,omitempty"`
 }
 
 type BillLineItem struct {

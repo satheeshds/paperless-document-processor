@@ -14,7 +14,7 @@ import (
 type receivedBillInput struct {
 	BillNumber string                 `json:"bill_number"`
 	Amount     int                    `json:"amount"`
-	LineItems  []receivedBillLineItem `json:"line_items"`
+	Items      []receivedBillLineItem `json:"items"`
 }
 
 type receivedBillLineItem struct {
@@ -83,11 +83,11 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	if receivedBill.BillNumber != "INV-123" {
 		t.Fatalf("expected bill number INV-123, got %s", receivedBill.BillNumber)
 	}
-	if len(receivedBill.LineItems) != 1 {
-		t.Fatalf("expected 1 line item, got %d", len(receivedBill.LineItems))
+	if len(receivedBill.Items) != 1 {
+		t.Fatalf("expected 1 line item, got %d", len(receivedBill.Items))
 	}
 
-	item := receivedBill.LineItems[0]
+	item := receivedBill.Items[0]
 	if item.Description != "Consulting services" {
 		t.Errorf("expected description Consulting services, got %s", item.Description)
 	}
