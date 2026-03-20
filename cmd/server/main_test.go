@@ -105,6 +105,57 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	}
 }
 
+func TestCreateLocalBill_RoundsTotalAmountToPaise(t *testing.T) {
+	var receivedBill receivedBillInput
+	errCh := make(chan error, 2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/contacts":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(accounting.Response[[]accounting.Contact]{
+				Data: []accounting.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bills":
+			if err := json.NewDecoder(r.Body).Decode(&receivedBill); err != nil {
+				errCh <- err
+				http.Error(w, "failed to decode bill input", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(accounting.Response[accounting.Bill]{
+				Data: accounting.Bill{ID: 31, Amount: receivedBill.Amount},
+			})
+		default:
+			errCh <- &unexpectedRequestError{method: r.Method, path: r.URL.Path}
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	s := &Server{accountingClient: accounting.NewClient(server.URL, "user", "pass")}
+	s.createLocalBill(124, &docai.ExtractedData{
+		ExampleDate: "2026-03-19",
+		TotalAmount: "0.29",
+		Supplier:    "Acme Corp",
+		Entities: map[string]string{
+			"invoice_id": "INV-124",
+		},
+	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/124"})
+
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if receivedBill.Amount != 29 {
+		t.Fatalf("expected rounded amount 29, got %d", receivedBill.Amount)
+	}
+}
+
 type unexpectedRequestError struct {
 	method string
 	path   string

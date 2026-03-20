@@ -83,11 +83,11 @@ func TestExtractData_LineItems(t *testing.T) {
 			{
 				Type: "line_item",
 				Properties: []*documentaipb.Document_Entity{
-					createLineItemProperty("description", "Consulting services", "Consulting services", nil),
+					createLineItemProperty("line_item/description", "Consulting services", "Consulting services", nil),
 					createLineItemProperty("quantity", "2", "2", &documentaipb.Document_Entity_NormalizedValue{Text: "2"}),
 					createLineItemProperty("unit", "hours", "hours", nil),
-					createLineItemProperty("unit_price", "$50.25", "$50.25", &documentaipb.Document_Entity_NormalizedValue{Text: "50.25"}),
-					createLineItemProperty("amount", "$100.50", "$100.50", &documentaipb.Document_Entity_NormalizedValue{Text: "100.50"}),
+					createLineItemProperty("invoice_line_item/unit_price", "$50.25", "$50.25", &documentaipb.Document_Entity_NormalizedValue{Text: "50.25"}),
+					createLineItemProperty("line_item/amount", "$100.50", "$100.50", &documentaipb.Document_Entity_NormalizedValue{Text: "100.50"}),
 				},
 			},
 		},

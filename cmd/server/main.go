@@ -410,8 +410,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 	}
 
 	// Build amount in paise
-	amountFloat, _ := strconv.ParseFloat(extracted.TotalAmount, 64)
-	amountPaise := int(amountFloat * 100)
+	amountPaise := decimalToPaise(extracted.TotalAmount)
 	if amountPaise <= 0 {
 		slog.Warn("Skipping accounting bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
 		return
