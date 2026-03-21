@@ -183,6 +183,34 @@ func TestBuildBillLineItems_FiltersNonPositiveAmount(t *testing.T) {
 	}
 }
 
+func TestBuildBillLineItems_FiltersNonPositiveUnitPrice(t *testing.T) {
+	items := buildBillLineItems([]docai.LineItem{
+		{Description: "Zero unit price", Quantity: "1", Unit: "pcs", UnitPrice: "0", Amount: "10.00"},
+		{Description: "Negative unit price", Quantity: "1", Unit: "pcs", UnitPrice: "-5.00", Amount: "10.00"},
+		{Description: "Valid item", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after filtering non-positive unit prices, got %d", len(items))
+	}
+	if items[0].Description != "Valid item" {
+		t.Errorf("expected description 'Valid item', got %s", items[0].Description)
+	}
+}
+
+func TestBuildBillLineItems_FiltersNonPositiveQuantity(t *testing.T) {
+	items := buildBillLineItems([]docai.LineItem{
+		{Description: "Zero quantity", Quantity: "0", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+		{Description: "Negative quantity", Quantity: "-1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+		{Description: "Valid item", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after filtering non-positive quantities, got %d", len(items))
+	}
+	if items[0].Description != "Valid item" {
+		t.Errorf("expected description 'Valid item', got %s", items[0].Description)
+	}
+}
+
 type unexpectedRequestError struct {
 	method string
 	path   string

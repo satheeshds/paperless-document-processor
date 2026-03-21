@@ -468,6 +468,14 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 			slog.Warn("Skipping line item with non-positive amount", "description", lineItem.Description, "amount", lineItem.Amount)
 			continue
 		}
+		if lineItem.UnitPrice <= 0 {
+			slog.Warn("Skipping line item with non-positive unit price", "description", lineItem.Description, "unit_price", lineItem.UnitPrice)
+			continue
+		}
+		if lineItem.Quantity <= 0 {
+			slog.Warn("Skipping line item with non-positive quantity", "description", lineItem.Description, "quantity", lineItem.Quantity)
+			continue
+		}
 		lineItems = append(lineItems, lineItem)
 	}
 
