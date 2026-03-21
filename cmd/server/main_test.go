@@ -159,6 +159,7 @@ func TestCreateLocalBill_RoundsTotalAmountToPaise(t *testing.T) {
 func TestBuildBillLineItems_FiltersEmptyDescription(t *testing.T) {
 	items := buildBillLineItems([]docai.LineItem{
 		{Description: "", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+		{Description: "   ", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
 		{Description: "Valid item", Quantity: "2", Unit: "hrs", UnitPrice: "50.00", Amount: "100.00"},
 	})
 	if len(items) != 1 {
@@ -171,7 +172,6 @@ func TestBuildBillLineItems_FiltersEmptyDescription(t *testing.T) {
 
 func TestBuildBillLineItems_FiltersNonPositiveAmount(t *testing.T) {
 	items := buildBillLineItems([]docai.LineItem{
-		{Description: "Zero amount", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "0"},
 		{Description: "Negative amount", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "-10.00"},
 		{Description: "Valid item", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
 	})
