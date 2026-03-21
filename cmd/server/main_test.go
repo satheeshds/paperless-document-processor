@@ -171,7 +171,7 @@ func TestBuildBillLineItems_FiltersEmptyDescription(t *testing.T) {
 
 func TestBuildBillLineItems_FiltersNonPositiveAmount(t *testing.T) {
 	items := buildBillLineItems([]docai.LineItem{
-		{Description: "Zero amount", Quantity: "1", Unit: "pcs", UnitPrice: "0", Amount: "0"},
+		{Description: "Zero amount", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "0"},
 		{Description: "Negative amount", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "-10.00"},
 		{Description: "Valid item", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
 	})
