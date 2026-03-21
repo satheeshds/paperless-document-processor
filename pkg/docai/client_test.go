@@ -16,6 +16,10 @@ func createEntity(typeStr, mentionText, content string, normalizedValue *documen
 	}
 }
 
+func createLineItemProperty(typeStr, mentionText, content string, normalizedValue *documentaipb.Document_Entity_NormalizedValue) *documentaipb.Document_Entity {
+	return createEntity(typeStr, mentionText, content, normalizedValue)
+}
+
 func TestExtractData(t *testing.T) {
 	// Setup a mock Document
 	doc := &documentaipb.Document{
@@ -70,5 +74,46 @@ func TestExtractData_Fallback(t *testing.T) {
 
 	if extracted.ExampleDate != "2023-01-01" {
 		t.Errorf("Expected date '2023-01-01', got '%s'", extracted.ExampleDate)
+	}
+}
+
+func TestExtractData_LineItems(t *testing.T) {
+	doc := &documentaipb.Document{
+		Entities: []*documentaipb.Document_Entity{
+			{
+				Type: "line_item",
+				Properties: []*documentaipb.Document_Entity{
+					createLineItemProperty("line_item/description", "Consulting services", "Consulting services", nil),
+					createLineItemProperty("quantity", "2", "2", &documentaipb.Document_Entity_NormalizedValue{Text: "2"}),
+					createLineItemProperty("unit", "hours", "hours", nil),
+					createLineItemProperty("invoice_line_item/unit_price", "$50.25", "$50.25", &documentaipb.Document_Entity_NormalizedValue{Text: "50.25"}),
+					createLineItemProperty("line_item/amount", "$100.50", "$100.50", &documentaipb.Document_Entity_NormalizedValue{Text: "100.50"}),
+				},
+			},
+		},
+	}
+
+	client := &Client{}
+	extracted := client.ExtractData(doc)
+
+	if len(extracted.LineItems) != 1 {
+		t.Fatalf("Expected 1 line item, got %d", len(extracted.LineItems))
+	}
+
+	item := extracted.LineItems[0]
+	if item.Description != "Consulting services" {
+		t.Errorf("Expected description 'Consulting services', got '%s'", item.Description)
+	}
+	if item.Quantity != "2" {
+		t.Errorf("Expected quantity '2', got '%s'", item.Quantity)
+	}
+	if item.Unit != "hours" {
+		t.Errorf("Expected unit 'hours', got '%s'", item.Unit)
+	}
+	if item.UnitPrice != "50.25" {
+		t.Errorf("Expected unit price '50.25', got '%s'", item.UnitPrice)
+	}
+	if item.Amount != "100.50" {
+		t.Errorf("Expected amount '100.50', got '%s'", item.Amount)
 	}
 }

@@ -38,14 +38,53 @@ type Bill struct {
 }
 
 type BillInput struct {
-	ContactID  *int   `json:"contact_id"`
-	BillNumber string `json:"bill_number"`
-	IssueDate  string `json:"issue_date,omitempty"`
-	DueDate    string `json:"due_date,omitempty"`
-	Amount     int    `json:"amount"` // in paise
-	Status     string `json:"status"`
-	FileURL    string `json:"file_url,omitempty"`
-	Notes      string `json:"notes,omitempty"`
+	ContactID  *int           `json:"contact_id"`
+	BillNumber string         `json:"bill_number"`
+	IssueDate  string         `json:"issue_date,omitempty"`
+	DueDate    string         `json:"due_date,omitempty"`
+	Amount     int            `json:"amount"` // in paise
+	Status     string         `json:"status"`
+	FileURL    string         `json:"file_url,omitempty"`
+	Notes      string         `json:"notes,omitempty"`
+	Items      []BillLineItem `json:"items,omitempty"`
+}
+
+type BillLineItem struct {
+	Description string  `json:"description,omitempty"`
+	Quantity    float64 `json:"quantity,omitempty"`
+	Unit        string  `json:"unit,omitempty"`
+	UnitPrice   int     `json:"unit_price,omitempty"`
+	Amount      int     `json:"amount,omitempty"`
+}
+
+type Invoice struct {
+	ID            int     `json:"id"`
+	ContactID     *int    `json:"contact_id"`
+	InvoiceNumber string  `json:"invoice_number"`
+	IssueDate     *string `json:"issue_date"`
+	DueDate       *string `json:"due_date"`
+	Amount        int     `json:"amount"` // in paise
+	Status        string  `json:"status"`
+}
+
+type InvoiceInput struct {
+	ContactID     *int              `json:"contact_id"`
+	InvoiceNumber string            `json:"invoice_number"`
+	IssueDate     string            `json:"issue_date,omitempty"`
+	DueDate       string            `json:"due_date,omitempty"`
+	Amount        int               `json:"amount"`
+	Status        string            `json:"status"`
+	FileURL       string            `json:"file_url,omitempty"`
+	Notes         string            `json:"notes,omitempty"`
+	Items         []InvoiceLineItem `json:"items,omitempty"`
+}
+
+type InvoiceLineItem struct {
+	Description string  `json:"description,omitempty"`
+	Quantity    float64 `json:"quantity,omitempty"`
+	Unit        string  `json:"unit,omitempty"`
+	UnitPrice   int     `json:"unit_price,omitempty"`
+	Amount      int     `json:"amount,omitempty"`
 }
 
 type Platform string
@@ -207,6 +246,26 @@ func (c *Client) CreateBill(bill BillInput) (int, error) {
 	}
 
 	var createResp Response[Bill]
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
+		return 0, err
+	}
+
+	return createResp.Data.ID, nil
+}
+
+func (c *Client) CreateInvoice(invoice InvoiceInput) (int, error) {
+	resp, err := c.request("POST", "invoices", invoice)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("failed to create invoice: %d %s", resp.StatusCode, string(body))
+	}
+
+	var createResp Response[Invoice]
 	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
 		return 0, err
 	}

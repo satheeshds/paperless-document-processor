@@ -4,7 +4,7 @@ This Go service integrates Paperless-ngx with Google Document AI to provide supe
 
 ## Features
 
-- **Google Document AI OCR**: Uses Google's powerful AI models to extract text and entities (Date, Total, Supplier).
+- **Google Document AI OCR**: Uses Google's powerful AI models to extract text and entities (Date, Total, Supplier, invoice line items).
 - **Automatic Metadata Updates**: Updates the document in Paperless with:
     - Extracted Content (OCR text)
     - Correspondent (Supplier Name)

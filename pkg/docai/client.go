@@ -24,7 +24,16 @@ type ExtractedData struct {
 	ExampleDate string // Just a placeholder, actual extraction depends on entities
 	TotalAmount string
 	Supplier    string
+	LineItems   []LineItem
 	Entities    map[string]string
+}
+
+type LineItem struct {
+	Description string
+	Quantity    string
+	Unit        string
+	UnitPrice   string
+	Amount      string
 }
 
 func NewClient(ctx context.Context, projectID, location, processorID, credentialsPath string) (*Client, error) {
@@ -193,6 +202,13 @@ func (c *Client) ExtractData(doc *documentaipb.Document) *ExtractedData {
 
 	// Iterate specific entities for Invoice Parser
 	for _, entity := range doc.Entities {
+		if isLineItemEntity(entity.Type) {
+			if item, ok := extractLineItem(entity); ok {
+				data.LineItems = append(data.LineItems, item)
+			}
+			continue
+		}
+
 		// Normalize type or just store raw
 		// Common invoice types: invoice_date, total_amount, supplier_name, currency...
 		key := entity.Type
@@ -240,6 +256,87 @@ func (c *Client) ExtractData(doc *documentaipb.Document) *ExtractedData {
 
 	slog.Info("Entity extraction completed", "entities_count", len(doc.Entities))
 	return data
+}
+
+func isLineItemEntity(entityType string) bool {
+	switch strings.ToLower(entityType) {
+	case "line_item", "invoice_line_item":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractLineItem(entity *documentaipb.Document_Entity) (LineItem, bool) {
+	item := LineItem{}
+
+	for _, prop := range entity.Properties {
+		field := normalizeLineItemField(prop.Type)
+		if field == "" {
+			continue
+		}
+
+		val := lineItemValue(prop, field != "description")
+		if val == "" {
+			continue
+		}
+
+		switch field {
+		case "description":
+			item.Description = val
+		case "quantity":
+			item.Quantity = val
+		case "unit":
+			item.Unit = val
+		case "unit_price":
+			item.UnitPrice = val
+		case "amount":
+			item.Amount = val
+		}
+	}
+
+	return item, item.Description != "" || item.Quantity != "" || item.Unit != "" || item.UnitPrice != "" || item.Amount != ""
+}
+
+func normalizeLineItemField(fieldType string) string {
+	fieldType = strings.ToLower(strings.TrimSpace(fieldType))
+	fieldType = strings.ReplaceAll(fieldType, "-", "_")
+	fieldType = strings.ReplaceAll(fieldType, " ", "_")
+
+	if idx := strings.LastIndex(fieldType, "/"); idx >= 0 {
+		fieldType = fieldType[idx+1:]
+	}
+
+	switch fieldType {
+	case "description", "item_description", "name":
+		return "description"
+	case "quantity", "qty":
+		return "quantity"
+	case "unit":
+		return "unit"
+	case "unit_price", "price", "unit_cost":
+		return "unit_price"
+	case "amount", "line_item_amount", "total_price", "total_amount":
+		return "amount"
+	default:
+		return ""
+	}
+}
+
+func lineItemValue(entity *documentaipb.Document_Entity, preferNormalized bool) string {
+	if preferNormalized && entity.NormalizedValue != nil && entity.NormalizedValue.Text != "" {
+		return strings.TrimSpace(entity.NormalizedValue.Text)
+	}
+	if entity.MentionText != "" {
+		return strings.TrimSpace(entity.MentionText)
+	}
+	if entity.TextAnchor != nil && entity.TextAnchor.Content != "" {
+		return strings.TrimSpace(entity.TextAnchor.Content)
+	}
+	if entity.NormalizedValue != nil {
+		return strings.TrimSpace(entity.NormalizedValue.Text)
+	}
+	return ""
 }
 
 func (c *Client) Close() error {
