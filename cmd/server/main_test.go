@@ -156,6 +156,33 @@ func TestCreateLocalBill_RoundsTotalAmountToPaise(t *testing.T) {
 	}
 }
 
+func TestBuildBillLineItems_FiltersEmptyDescription(t *testing.T) {
+	items := buildBillLineItems([]docai.LineItem{
+		{Description: "", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+		{Description: "Valid item", Quantity: "2", Unit: "hrs", UnitPrice: "50.00", Amount: "100.00"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after filtering empty description, got %d", len(items))
+	}
+	if items[0].Description != "Valid item" {
+		t.Errorf("expected description 'Valid item', got %s", items[0].Description)
+	}
+}
+
+func TestBuildBillLineItems_FiltersNonPositiveAmount(t *testing.T) {
+	items := buildBillLineItems([]docai.LineItem{
+		{Description: "Zero amount", Quantity: "1", Unit: "pcs", UnitPrice: "0", Amount: "0"},
+		{Description: "Negative amount", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "-10.00"},
+		{Description: "Valid item", Quantity: "1", Unit: "pcs", UnitPrice: "10.00", Amount: "10.00"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after filtering non-positive amounts, got %d", len(items))
+	}
+	if items[0].Description != "Valid item" {
+		t.Errorf("expected description 'Valid item', got %s", items[0].Description)
+	}
+}
+
 type unexpectedRequestError struct {
 	method string
 	path   string
