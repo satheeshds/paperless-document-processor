@@ -12,7 +12,7 @@ type recordedBillInput struct {
 	BillNumber string                 `json:"bill_number"`
 	IssueDate  string                 `json:"issue_date"`
 	DueDate    string                 `json:"due_date"`
-	Amount     int                    `json:"amount"`
+	Amount     float64                `json:"amount"`
 	Status     string                 `json:"status"`
 	FileURL    string                 `json:"file_url"`
 	Notes      string                 `json:"notes"`
@@ -23,8 +23,8 @@ type recordedBillLineItem struct {
 	Description string  `json:"description"`
 	Quantity    float64 `json:"quantity"`
 	Unit        string  `json:"unit"`
-	UnitPrice   int     `json:"unit_price"`
-	Amount      int     `json:"amount"`
+	UnitPrice   float64 `json:"unit_price"`
+	Amount      float64 `json:"amount"`
 }
 
 type recordedInvoiceInput struct {
@@ -32,7 +32,7 @@ type recordedInvoiceInput struct {
 	InvoiceNumber string                    `json:"invoice_number"`
 	IssueDate     string                    `json:"issue_date"`
 	DueDate       string                    `json:"due_date"`
-	Amount        int                       `json:"amount"`
+	Amount        float64                   `json:"amount"`
 	Status        string                    `json:"status"`
 	FileURL       string                    `json:"file_url"`
 	Notes         string                    `json:"notes"`
@@ -43,8 +43,8 @@ type recordedInvoiceLineItem struct {
 	Description string  `json:"description"`
 	Quantity    float64 `json:"quantity"`
 	Unit        string  `json:"unit"`
-	UnitPrice   int     `json:"unit_price"`
-	Amount      int     `json:"amount"`
+	UnitPrice   float64 `json:"unit_price"`
+	Amount      float64 `json:"amount"`
 }
 
 func TestGetOrCreateVendor_Existing(t *testing.T) {
@@ -112,8 +112,8 @@ func TestCreateBill(t *testing.T) {
 		if r.Method == "POST" && r.URL.Path == "/api/v1/bills" {
 			var input recordedBillInput
 			json.NewDecoder(r.Body).Decode(&input)
-			if input.Amount != 10050 {
-				t.Errorf("Expected amount 10050, got %d", input.Amount)
+			if input.Amount != 100.50 {
+				t.Errorf("Expected amount 100.50, got %v", input.Amount)
 			}
 			if input.BillNumber != "BILL-001" {
 				t.Errorf("Expected bill number BILL-001, got %s", input.BillNumber)
@@ -128,13 +128,13 @@ func TestCreateBill(t *testing.T) {
 				if input.Items[0].Unit != "hours" {
 					t.Errorf("Expected line item unit hours, got %s", input.Items[0].Unit)
 				}
-				if input.Items[0].Amount != 10050 {
-					t.Errorf("Expected line item amount 10050, got %d", input.Items[0].Amount)
+				if input.Items[0].Amount != 100.50 {
+					t.Errorf("Expected line item amount 100.50, got %v", input.Items[0].Amount)
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(Response[Bill]{Data: Bill{ID: 30, Amount: 10050}})
+			json.NewEncoder(w).Encode(Response[Bill]{Data: Bill{ID: 30, Amount: 100.50}})
 			return
 		}
 		t.Errorf("Unexpected request: %s %s", r.Method, r.URL.Path)
@@ -146,14 +146,14 @@ func TestCreateBill(t *testing.T) {
 	id, err := client.CreateBill(BillInput{
 		ContactID:  &contactID,
 		BillNumber: "BILL-001",
-		Amount:     10050,
+		Amount:     100.50,
 		Items: []BillLineItem{
 			{
 				Description: "Consulting services",
 				Quantity:    2,
 				Unit:        "hours",
-				UnitPrice:   5025,
-				Amount:      10050,
+				UnitPrice:   50.25,
+				Amount:      100.50,
 			},
 		},
 	})
@@ -170,8 +170,8 @@ func TestCreateInvoice(t *testing.T) {
 		if r.Method == "POST" && r.URL.Path == "/api/v1/invoices" {
 			var input recordedInvoiceInput
 			json.NewDecoder(r.Body).Decode(&input)
-			if input.Amount != 10050 {
-				t.Errorf("Expected amount 10050, got %d", input.Amount)
+			if input.Amount != 100.50 {
+				t.Errorf("Expected amount 100.50, got %v", input.Amount)
 			}
 			if input.InvoiceNumber != "INV-001" {
 				t.Errorf("Expected invoice number INV-001, got %s", input.InvoiceNumber)
@@ -186,13 +186,13 @@ func TestCreateInvoice(t *testing.T) {
 				if input.Items[0].Unit != "hours" {
 					t.Errorf("Expected item unit hours, got %s", input.Items[0].Unit)
 				}
-				if input.Items[0].Amount != 10050 {
-					t.Errorf("Expected item amount 10050, got %d", input.Items[0].Amount)
+				if input.Items[0].Amount != 100.50 {
+					t.Errorf("Expected item amount 100.50, got %v", input.Items[0].Amount)
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(Response[Invoice]{Data: Invoice{ID: 31, Amount: 10050}})
+			json.NewEncoder(w).Encode(Response[Invoice]{Data: Invoice{ID: 31, Amount: 100.50}})
 			return
 		}
 		t.Errorf("Unexpected request: %s %s", r.Method, r.URL.Path)
@@ -204,14 +204,14 @@ func TestCreateInvoice(t *testing.T) {
 	id, err := client.CreateInvoice(InvoiceInput{
 		ContactID:     &contactID,
 		InvoiceNumber: "INV-001",
-		Amount:        10050,
+		Amount:        100.50,
 		Items: []InvoiceLineItem{
 			{
 				Description: "Consulting services",
 				Quantity:    2,
 				Unit:        "hours",
-				UnitPrice:   5025,
-				Amount:      10050,
+				UnitPrice:   50.25,
+				Amount:      100.50,
 			},
 		},
 	})

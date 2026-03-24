@@ -409,9 +409,9 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		dueAt = t.AddDate(0, 0, 30).Format("2006-01-02")
 	}
 
-	// Build amount in paise
-	amountPaise := decimalToPaise(extracted.TotalAmount)
-	if amountPaise <= 0 {
+	// Build amount (portal handles paise conversion)
+	amount := decimalToAmount(extracted.TotalAmount)
+	if amount <= 0 {
 		slog.Warn("Skipping accounting bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
 		return
 	}
@@ -427,7 +427,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		BillNumber: docNumber,
 		IssueDate:  issuedAt,
 		DueDate:    dueAt,
-		Amount:     amountPaise,
+		Amount:     amount,
 		Status:     "draft",
 		FileURL:    req.DocURL,
 		Notes:      fmt.Sprintf("Auto-created from Paperless document #%d (%s)", docID, doc.OriginalFileName),
@@ -451,11 +451,11 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 			Description: strings.TrimSpace(item.Description),
 			Quantity:    parseDecimal(item.Quantity),
 			Unit:        strings.TrimSpace(item.Unit),
-			UnitPrice:   decimalToPaise(item.UnitPrice),
-			Amount:      decimalToPaise(item.Amount),
+			UnitPrice:   decimalToAmount(item.UnitPrice),
+			Amount:      decimalToAmount(item.Amount),
 		}
 		if lineItem.Amount == 0 && lineItem.Quantity > 0 && lineItem.UnitPrice > 0 {
-			lineItem.Amount = int(math.Round(lineItem.Quantity * float64(lineItem.UnitPrice)))
+			lineItem.Amount = roundToTwo(lineItem.Quantity * lineItem.UnitPrice)
 		}
 		if lineItem.Description == "" && lineItem.Quantity == 0 && lineItem.Unit == "" && lineItem.UnitPrice == 0 && lineItem.Amount == 0 {
 			continue
@@ -482,12 +482,16 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 	return lineItems
 }
 
-func decimalToPaise(raw string) int {
+func decimalToAmount(raw string) float64 {
 	value := parseDecimal(raw)
 	if value == 0 {
 		return 0
 	}
-	return int(math.Round(value * 100))
+	return roundToTwo(value)
+}
+
+func roundToTwo(val float64) float64 {
+	return math.Round(val*100) / 100
 }
 
 func parseDecimal(raw string) float64 {

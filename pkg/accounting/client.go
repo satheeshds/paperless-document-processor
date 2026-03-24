@@ -33,7 +33,7 @@ type Bill struct {
 	BillNumber string  `json:"bill_number"`
 	IssueDate  *string `json:"issue_date"`
 	DueDate    *string `json:"due_date"`
-	Amount     int     `json:"amount"` // in paise
+	Amount     float64 `json:"amount"`
 	Status     string  `json:"status"`
 }
 
@@ -42,7 +42,7 @@ type BillInput struct {
 	BillNumber string         `json:"bill_number"`
 	IssueDate  string         `json:"issue_date,omitempty"`
 	DueDate    string         `json:"due_date,omitempty"`
-	Amount     int            `json:"amount"` // in paise
+	Amount     float64        `json:"amount"`
 	Status     string         `json:"status"`
 	FileURL    string         `json:"file_url,omitempty"`
 	Notes      string         `json:"notes,omitempty"`
@@ -53,8 +53,8 @@ type BillLineItem struct {
 	Description string  `json:"description,omitempty"`
 	Quantity    float64 `json:"quantity,omitempty"`
 	Unit        string  `json:"unit,omitempty"`
-	UnitPrice   int     `json:"unit_price,omitempty"`
-	Amount      int     `json:"amount,omitempty"`
+	UnitPrice   float64 `json:"unit_price,omitempty"`
+	Amount      float64 `json:"amount,omitempty"`
 }
 
 type Invoice struct {
@@ -63,7 +63,7 @@ type Invoice struct {
 	InvoiceNumber string  `json:"invoice_number"`
 	IssueDate     *string `json:"issue_date"`
 	DueDate       *string `json:"due_date"`
-	Amount        int     `json:"amount"` // in paise
+	Amount        float64 `json:"amount"`
 	Status        string  `json:"status"`
 }
 
@@ -72,7 +72,7 @@ type InvoiceInput struct {
 	InvoiceNumber string            `json:"invoice_number"`
 	IssueDate     string            `json:"issue_date,omitempty"`
 	DueDate       string            `json:"due_date,omitempty"`
-	Amount        int               `json:"amount"`
+	Amount        float64           `json:"amount"`
 	Status        string            `json:"status"`
 	FileURL       string            `json:"file_url,omitempty"`
 	Notes         string            `json:"notes,omitempty"`
@@ -83,8 +83,8 @@ type InvoiceLineItem struct {
 	Description string  `json:"description,omitempty"`
 	Quantity    float64 `json:"quantity,omitempty"`
 	Unit        string  `json:"unit,omitempty"`
-	UnitPrice   int     `json:"unit_price,omitempty"`
-	Amount      int     `json:"amount,omitempty"`
+	UnitPrice   float64 `json:"unit_price,omitempty"`
+	Amount      float64 `json:"amount,omitempty"`
 }
 
 type Platform string
