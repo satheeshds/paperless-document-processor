@@ -55,6 +55,21 @@ docker-compose up -d
 ```
 (This will pull the image `satheeshds/paperless-document-processor` from Docker Hub)
 
+##### Using the Makefile
+
+Common Docker commands are available via `make`:
+
+```bash
+# Build the Docker image locally (override TAG if needed)
+make image TAG=latest
+
+# Start the stack with docker compose (uses .env by default)
+make compose-up
+
+# Stop the stack
+make compose-down
+```
+
 #### Option B: Standalone
 
 You can run the service using the provided script:
