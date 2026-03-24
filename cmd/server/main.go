@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"strconv"
@@ -409,9 +410,9 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		dueAt = t.AddDate(0, 0, 30).Format("2006-01-02")
 	}
 
-	// Build amount in paise
-	amountPaise := decimalToPaise(extracted.TotalAmount)
-	if amountPaise <= 0 {
+	// Build amount (portal handles paise conversion)
+	amount := decimalToAmount(extracted.TotalAmount)
+	if amount <= 0 {
 		slog.Warn("Skipping accounting bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
 		return
 	}
@@ -427,7 +428,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		BillNumber: docNumber,
 		IssueDate:  issuedAt,
 		DueDate:    dueAt,
-		Amount:     amountPaise,
+		Amount:     amount,
 		Status:     "draft",
 		FileURL:    req.DocURL,
 		Notes:      fmt.Sprintf("Auto-created from Paperless document #%d (%s)", docID, doc.OriginalFileName),
@@ -451,11 +452,11 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 			Description: strings.TrimSpace(item.Description),
 			Quantity:    parseDecimal(item.Quantity),
 			Unit:        strings.TrimSpace(item.Unit),
-			UnitPrice:   decimalToPaise(item.UnitPrice),
-			Amount:      decimalToPaise(item.Amount),
+			UnitPrice:   decimalToAmount(item.UnitPrice),
+			Amount:      decimalToAmount(item.Amount),
 		}
 		if lineItem.Amount == 0 && lineItem.Quantity > 0 && lineItem.UnitPrice > 0 {
-			lineItem.Amount = int(math.Round(lineItem.Quantity * float64(lineItem.UnitPrice)))
+			lineItem.Amount = roundToTwo(lineItem.Quantity * lineItem.UnitPrice)
 		}
 		if lineItem.Description == "" && lineItem.Quantity == 0 && lineItem.Unit == "" && lineItem.UnitPrice == 0 && lineItem.Amount == 0 {
 			continue
@@ -482,12 +483,21 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 	return lineItems
 }
 
-func decimalToPaise(raw string) int {
-	value := parseDecimal(raw)
-	if value == 0 {
+func decimalToAmount(raw string) float64 {
+	rat, ok := parseDecimalRat(raw)
+	if !ok {
 		return 0
 	}
-	return int(math.Round(value * 100))
+
+	// Convert to paise (integer) using half-up rounding to avoid binary float errors.
+	paiseRat := new(big.Rat).Mul(rat, big.NewRat(100, 1))
+	paiseInt := roundRatHalfUpToInt(paiseRat)
+
+	return float64(paiseInt.Int64()) / 100
+}
+
+func roundToTwo(val float64) float64 {
+	return math.Round(val*100) / 100
 }
 
 func parseDecimal(raw string) float64 {
@@ -519,6 +529,59 @@ func parseDecimal(raw string) float64 {
 		return 0
 	}
 	return value
+}
+
+func parseDecimalRat(raw string) (*big.Rat, bool) {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return nil, false
+	}
+
+	var b strings.Builder
+	for _, r := range cleaned {
+		if (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '-' || r == '+' {
+			b.WriteRune(r)
+		}
+	}
+	normalized := strings.ReplaceAll(b.String(), ",", "")
+
+	if normalized == "" || normalized == "-" || normalized == "+" || normalized == "." {
+		slog.Warn("Failed to parse decimal: no numeric content after normalization", "raw", raw)
+		return nil, false
+	}
+
+	rat, ok := new(big.Rat).SetString(normalized)
+	if !ok {
+		slog.Warn("Failed to parse decimal to rational", "raw", raw, "normalized", normalized)
+		return nil, false
+	}
+	return rat, true
+}
+
+func roundRatHalfUpToInt(rat *big.Rat) *big.Int {
+	if rat == nil {
+		return big.NewInt(0)
+	}
+
+	n := new(big.Int).Set(rat.Num())
+	d := new(big.Int).Set(rat.Denom())
+
+	q := new(big.Int).Quo(n, d)
+	r := new(big.Int).Sub(n, new(big.Int).Mul(q, d))
+
+	absR := new(big.Int).Abs(r)
+	absD := new(big.Int).Abs(d)
+
+	// Compare |r| * 2 with |d| for half-up rounding.
+	doubleR := new(big.Int).Lsh(absR, 1)
+	if doubleR.Cmp(absD) >= 0 {
+		if n.Sign() >= 0 {
+			q.Add(q, big.NewInt(1))
+		} else {
+			q.Sub(q, big.NewInt(1))
+		}
+	}
+	return q
 }
 
 func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {

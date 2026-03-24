@@ -13,7 +13,7 @@ import (
 
 type receivedBillInput struct {
 	BillNumber string                 `json:"bill_number"`
-	Amount     int                    `json:"amount"`
+	Amount     float64                `json:"amount"`
 	Items      []receivedBillLineItem `json:"items"`
 }
 
@@ -21,8 +21,8 @@ type receivedBillLineItem struct {
 	Description string  `json:"description"`
 	Quantity    float64 `json:"quantity"`
 	Unit        string  `json:"unit"`
-	UnitPrice   int     `json:"unit_price"`
-	Amount      int     `json:"amount"`
+	UnitPrice   float64 `json:"unit_price"`
+	Amount      float64 `json:"amount"`
 }
 
 func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
@@ -97,15 +97,15 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	if item.Unit != "hours" {
 		t.Errorf("expected unit hours, got %s", item.Unit)
 	}
-	if item.UnitPrice != 5025 {
-		t.Errorf("expected unit price 5025, got %d", item.UnitPrice)
+	if item.UnitPrice != 50.25 {
+		t.Errorf("expected unit price 50.25, got %v", item.UnitPrice)
 	}
-	if item.Amount != 10050 {
-		t.Errorf("expected amount 10050, got %d", item.Amount)
+	if item.Amount != 100.50 {
+		t.Errorf("expected amount 100.50, got %v", item.Amount)
 	}
 }
 
-func TestCreateLocalBill_RoundsTotalAmountToPaise(t *testing.T) {
+func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 	var receivedBill receivedBillInput
 	errCh := make(chan error, 2)
 
@@ -137,7 +137,7 @@ func TestCreateLocalBill_RoundsTotalAmountToPaise(t *testing.T) {
 	s := &Server{accountingClient: accounting.NewClient(server.URL, "user", "pass")}
 	s.createLocalBill(124, &docai.ExtractedData{
 		ExampleDate: "2026-03-19",
-		TotalAmount: "0.29",
+		TotalAmount: "0.295",
 		Supplier:    "Acme Corp",
 		Entities: map[string]string{
 			"invoice_id": "INV-124",
@@ -151,8 +151,8 @@ func TestCreateLocalBill_RoundsTotalAmountToPaise(t *testing.T) {
 		}
 	}
 
-	if receivedBill.Amount != 29 {
-		t.Fatalf("expected rounded amount 29, got %d", receivedBill.Amount)
+	if receivedBill.Amount != 0.30 {
+		t.Fatalf("expected rounded amount 0.30, got %v", receivedBill.Amount)
 	}
 }
 
