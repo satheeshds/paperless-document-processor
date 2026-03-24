@@ -137,7 +137,7 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 	s := &Server{accountingClient: accounting.NewClient(server.URL, "user", "pass")}
 	s.createLocalBill(124, &docai.ExtractedData{
 		ExampleDate: "2026-03-19",
-		TotalAmount: "0.29",
+		TotalAmount: "0.295",
 		Supplier:    "Acme Corp",
 		Entities: map[string]string{
 			"invoice_id": "INV-124",
@@ -151,8 +151,8 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 		}
 	}
 
-	if receivedBill.Amount != 0.29 {
-		t.Fatalf("expected rounded amount 0.29, got %v", receivedBill.Amount)
+	if receivedBill.Amount != 0.30 {
+		t.Fatalf("expected rounded amount 0.30, got %v", receivedBill.Amount)
 	}
 }
 

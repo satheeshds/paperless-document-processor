@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"strconv"
@@ -483,11 +484,16 @@ func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineIt
 }
 
 func decimalToAmount(raw string) float64 {
-	value := parseDecimal(raw)
-	if value == 0 {
+	rat, ok := parseDecimalRat(raw)
+	if !ok {
 		return 0
 	}
-	return roundToTwo(value)
+
+	// Convert to paise (integer) using half-up rounding to avoid binary float errors.
+	paiseRat := new(big.Rat).Mul(rat, big.NewRat(100, 1))
+	paiseInt := roundRatHalfUpToInt(paiseRat)
+
+	return float64(paiseInt.Int64()) / 100
 }
 
 func roundToTwo(val float64) float64 {
@@ -523,6 +529,59 @@ func parseDecimal(raw string) float64 {
 		return 0
 	}
 	return value
+}
+
+func parseDecimalRat(raw string) (*big.Rat, bool) {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return nil, false
+	}
+
+	var b strings.Builder
+	for _, r := range cleaned {
+		if (r >= '0' && r <= '9') || r == '.' || r == ',' || r == '-' || r == '+' {
+			b.WriteRune(r)
+		}
+	}
+	normalized := strings.ReplaceAll(b.String(), ",", "")
+
+	if normalized == "" || normalized == "-" || normalized == "+" || normalized == "." {
+		slog.Warn("Failed to parse decimal: no numeric content after normalization", "raw", raw)
+		return nil, false
+	}
+
+	rat, ok := new(big.Rat).SetString(normalized)
+	if !ok {
+		slog.Warn("Failed to parse decimal to rational", "raw", raw, "normalized", normalized)
+		return nil, false
+	}
+	return rat, true
+}
+
+func roundRatHalfUpToInt(rat *big.Rat) *big.Int {
+	if rat == nil {
+		return big.NewInt(0)
+	}
+
+	n := new(big.Int).Set(rat.Num())
+	d := new(big.Int).Set(rat.Denom())
+
+	q := new(big.Int).Quo(n, d)
+	r := new(big.Int).Sub(n, new(big.Int).Mul(q, d))
+
+	absR := new(big.Int).Abs(r)
+	absD := new(big.Int).Abs(d)
+
+	// Compare |r| * 2 with |d| for half-up rounding.
+	doubleR := new(big.Int).Lsh(absR, 1)
+	if doubleR.Cmp(absD) >= 0 {
+		if n.Sign() >= 0 {
+			q.Add(q, big.NewInt(1))
+		} else {
+			q.Sub(q, big.NewInt(1))
+		}
+	}
+	return q
 }
 
 func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
