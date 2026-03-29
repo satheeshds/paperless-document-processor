@@ -2,6 +2,31 @@
 
 This Go service integrates Paperless-ngx with Google Document AI to provide superior OCR and metadata extraction for your invoices.
 
+## Test Coverage
+
+Unit tests are provided for all major packages. Run the full suite and generate a coverage report with:
+
+```bash
+go test ./... -coverprofile=coverage.out
+go tool cover -html=coverage.out   # open an HTML coverage report in your browser
+```
+
+Current coverage by package:
+
+| Package | Coverage |
+|---|---|
+| `config` | 100% |
+| `pkg/tika` | ~91% |
+| `pkg/accounting` | ~82% |
+| `pkg/libreoffice` | ~82% |
+| `pkg/excel` | ~86% |
+| `pkg/paperless` | ~78% |
+| `pkg/docai` | ~40% |
+| `cmd/server` | ~17% |
+| **Overall** | **~44%** |
+
+> `pkg/storage` functions that require a live DuckDB connection are exercised through integration testing; the pure helper `marshalOrderedRows` is unit-tested directly.
+
 ## Features
 
 - **Google Document AI OCR**: Uses Google's powerful AI models to extract text and entities (Date, Total, Supplier, invoice line items).
