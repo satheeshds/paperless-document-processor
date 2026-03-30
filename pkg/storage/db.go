@@ -37,6 +37,13 @@ type ProcessedDocument struct {
 	CreatedAt     time.Time
 }
 
+type ServiceAccount struct {
+	ID         int
+	Name       string
+	APIKeyHash string
+	CreatedAt  time.Time
+}
+
 func InitDB(filepath string) (*DB, error) {
 	slog.Info("Initializing database", "path", filepath)
 	db, err := sql.Open("duckdb", filepath)
@@ -69,6 +76,7 @@ func createTables(db *sql.DB) error {
 	// 1. Try to create the sequence (Native DuckDB path)
 	_, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_processed_documents_id;")
 
+	var isSQLite bool
 	var query string
 	if err == nil {
 		// Success! This is a native DuckDB database.
@@ -88,6 +96,7 @@ func createTables(db *sql.DB) error {
 	} else if strings.Contains(err.Error(), "SQLite") || strings.Contains(strings.ToLower(err.Error()), "sqlite") {
 		// This is a SQLite file being opened by DuckDB.
 		slog.Warn("Database identified as SQLite, using SQLite-compatible schema")
+		isSQLite = true
 		query = `
 		CREATE TABLE IF NOT EXISTS processed_documents (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +121,34 @@ func createTables(db *sql.DB) error {
 
 	// Create index
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_paperless_id ON processed_documents(paperless_id);`)
+	if err != nil {
+		return err
+	}
+
+	// Create service_accounts table
+	var saQuery string
+	if isSQLite {
+		saQuery = `
+		CREATE TABLE IF NOT EXISTS service_accounts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			api_key_hash TEXT NOT NULL UNIQUE,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`
+	} else {
+		_, err = db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_service_accounts_id;")
+		if err != nil {
+			return fmt.Errorf("failed to create service_accounts sequence: %w", err)
+		}
+		saQuery = `
+		CREATE TABLE IF NOT EXISTS service_accounts (
+			id INTEGER PRIMARY KEY DEFAULT nextval('seq_service_accounts_id'),
+			name TEXT NOT NULL,
+			api_key_hash TEXT NOT NULL UNIQUE,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`
+	}
+	_, err = db.Exec(saQuery)
 	return err
 }
 
@@ -141,6 +178,37 @@ func (d *DB) IsDocumentProcessed(docID int) (bool, error) {
 
 func (d *DB) Close() error {
 	return d.Conn.Close()
+}
+
+// CreateServiceAccount inserts a new service account with the given name and hashed API key.
+// Returns the ID of the newly created service account.
+func (d *DB) CreateServiceAccount(name, apiKeyHash string) (int, error) {
+	var id int
+	err := d.Conn.QueryRow(
+		`INSERT INTO service_accounts (name, api_key_hash) VALUES (?, ?) RETURNING id`,
+		name, apiKeyHash,
+	).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create service account: %w", err)
+	}
+	return id, nil
+}
+
+// GetServiceAccountByKeyHash looks up a service account by the hash of its API key.
+// Returns nil, nil when no matching account exists.
+func (d *DB) GetServiceAccountByKeyHash(apiKeyHash string) (*ServiceAccount, error) {
+	row := d.Conn.QueryRow(
+		`SELECT id, name, api_key_hash, created_at FROM service_accounts WHERE api_key_hash = ?`,
+		apiKeyHash,
+	)
+	var sa ServiceAccount
+	if err := row.Scan(&sa.ID, &sa.Name, &sa.APIKeyHash, &sa.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get service account: %w", err)
+	}
+	return &sa, nil
 }
 
 // ProcessPlatformExcel reads an Excel file using DuckDB and stores it into a platform-specific table.

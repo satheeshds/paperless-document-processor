@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -48,6 +51,17 @@ type PayoutRequest struct {
 
 type BankStatementRequest struct {
 	DocURL string `json:"doc_url"`
+}
+
+type CreateServiceAccountRequest struct {
+	Name string `json:"name"`
+}
+
+type CreateServiceAccountResponse struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	APIKey    string `json:"api_key"`
+	CreatedAt string `json:"created_at"`
 }
 
 func main() {
@@ -193,6 +207,7 @@ func main() {
 	http.HandleFunc("POST /bills", srv.handleBills)
 	http.HandleFunc("POST /payouts", srv.handlePayouts)
 	http.HandleFunc("POST /bank-statements", srv.handleBankStatements)
+	http.HandleFunc("POST /service-accounts", srv.handleCreateServiceAccount)
 	slog.Info("Starting server", "port", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, nil); err != nil {
 		slog.Error("Server failed", "error", err)
@@ -941,4 +956,63 @@ func (s *Server) parseAmount(val string) int {
 	val = strings.TrimSpace(val)
 	amtFloat, _ := strconv.ParseFloat(val, 64)
 	return int(amtFloat * 100)
+}
+
+// generateAPIKey creates a cryptographically secure random API key.
+func generateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate API key: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// hashAPIKey returns the SHA-256 hex digest of the given API key.
+func hashAPIKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// handleCreateServiceAccount creates a new service account and returns the plain API key.
+func (s *Server) handleCreateServiceAccount(w http.ResponseWriter, r *http.Request) {
+	var req CreateServiceAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		slog.Error("Failed to decode service account request", "error", err)
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	plainKey, err := generateAPIKey()
+	if err != nil {
+		slog.Error("Failed to generate API key", "error", err)
+		http.Error(w, "Failed to generate API key", http.StatusInternalServerError)
+		return
+	}
+
+	keyHash := hashAPIKey(plainKey)
+	id, err := s.db.CreateServiceAccount(req.Name, keyHash)
+	if err != nil {
+		slog.Error("Failed to create service account", "name", req.Name, "error", err)
+		http.Error(w, "Failed to create service account", http.StatusInternalServerError)
+		return
+	}
+
+	resp := CreateServiceAccountResponse{
+		ID:        id,
+		Name:      req.Name,
+		APIKey:    plainKey,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Error("Failed to encode service account response", "error", err)
+	}
+	slog.Info("Created service account", "id", id, "name", req.Name)
 }
