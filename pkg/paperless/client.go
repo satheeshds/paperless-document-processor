@@ -13,9 +13,10 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	baseURL  string
+	username string
+	password string
+	client   *http.Client
 }
 
 type Document struct {
@@ -71,11 +72,12 @@ type PaginatedResponse[T any] struct {
 	Results  []T    `json:"results"`
 }
 
-func NewClient(baseURL, token string) *Client {
+func NewClient(baseURL, username, password string) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		client:  &http.Client{},
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		username: username,
+		password: password,
+		client:   &http.Client{},
 	}
 }
 
@@ -99,7 +101,7 @@ func (c *Client) request(method, path string, body interface{}) (*http.Response,
 		return nil, err
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Token %s", c.token))
+	req.SetBasicAuth(c.username, c.password)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -168,7 +170,7 @@ func (c *Client) DownloadDocument(id int, original bool) ([]byte, error) {
 		slog.Error("Failed to create download request", "id", id, "error", err)
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Token %s", c.token))
+	req.SetBasicAuth(c.username, c.password)
 
 	resp, err := c.client.Do(req)
 	if err != nil {

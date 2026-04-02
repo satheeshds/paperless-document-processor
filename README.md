@@ -33,7 +33,8 @@ This Go service integrates Paperless-ngx with Google Document AI to provide supe
 ```env
 # Paperless
 PAPERLESS_URL=http://your-paperless:8000
-PAPERLESS_TOKEN=your-token
+PAPERLESS_USERNAME=your-username
+PAPERLESS_PASSWORD=your-password
 
 # Google Cloud
 GOOGLE_CLOUD_PROJECT=your-project-id

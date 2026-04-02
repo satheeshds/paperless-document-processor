@@ -12,7 +12,8 @@ type Config struct {
 	Port                     string
 	DBPath                   string
 	PaperlessURL             string
-	PaperlessToken           string
+	PaperlessUsername        string
+	PaperlessPassword        string
 	GoogleProjectID          string
 	GoogleLocation           string
 	DocumentAIProcessorID    string
@@ -42,7 +43,8 @@ func Load() (*Config, error) {
 		Port:                  getEnv("PORT", "80"),
 		DBPath:                getEnv("DB_PATH", "data/duck.db"),
 		PaperlessURL:          os.Getenv("PAPERLESS_URL"),
-		PaperlessToken:        os.Getenv("PAPERLESS_TOKEN"),
+		PaperlessUsername:     os.Getenv("PAPERLESS_USERNAME"),
+		PaperlessPassword:     os.Getenv("PAPERLESS_PASSWORD"),
 		GoogleProjectID:       os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		GoogleLocation:        os.Getenv("GOOGLE_CLOUD_LOCATION"),
 		DocumentAIProcessorID: os.Getenv("DOCUMENT_AI_PROCESSOR_ID"),
@@ -73,8 +75,14 @@ func (c *Config) validate() error {
 	if c.PaperlessURL == "" {
 		return fmt.Errorf("PAPERLESS_URL is required")
 	}
-	if c.PaperlessToken == "" {
-		return fmt.Errorf("PAPERLESS_TOKEN is required")
+	if c.PaperlessUsername == "" {
+		return fmt.Errorf("PAPERLESS_USERNAME is required")
+	}
+	if strings.ContainsRune(c.PaperlessUsername, ':') {
+		return fmt.Errorf("PAPERLESS_USERNAME must not contain a colon character")
+	}
+	if c.PaperlessPassword == "" {
+		return fmt.Errorf("PAPERLESS_PASSWORD is required")
 	}
 	if c.GoogleProjectID == "" {
 		return fmt.Errorf("GOOGLE_CLOUD_PROJECT is required")

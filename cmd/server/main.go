@@ -83,7 +83,7 @@ func main() {
 	defer db.Close()
 
 	// 3. Init Clients
-	pClient := paperless.NewClient(cfg.PaperlessURL, cfg.PaperlessToken)
+	pClient := paperless.NewClient(cfg.PaperlessURL, cfg.PaperlessUsername, cfg.PaperlessPassword)
 
 	ctx := context.Background()
 	dClient, err := docai.NewClient(ctx, cfg.GoogleProjectID, cfg.GoogleLocation, cfg.DocumentAIProcessorID, cfg.GoogleCredentialsPath)
