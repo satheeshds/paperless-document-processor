@@ -10,7 +10,12 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
-      - DB_PATH=/app/data/duck.db
+      # Nexus gateway (see github.com/satheeshds/nexus)
+      - NEXUS_HOST=${NEXUS_HOST:-nexus-gateway}
+      - NEXUS_PORT=${NEXUS_PORT:-5433}
+      - NEXUS_TENANT_ID=${NEXUS_TENANT_ID}
+      - NEXUS_PASSWORD=${NEXUS_PASSWORD}
+      - NEXUS_DB=${NEXUS_DB:-lake}
       # Pass these from .env file or host environment
       - PAPERLESS_URL=${PAPERLESS_URL}
       - PAPERLESS_USERNAME=${PAPERLESS_USERNAME}
@@ -25,7 +30,6 @@ services:
       - ACCOUNTING_USER=${ACCOUNTING_USER}
       - ACCOUNTING_PASS=${ACCOUNTING_PASS}
     volumes:
-      - ./data:/app/data
       - /path/to/paperless/media:/app/media:ro
       # Mount the service account key
       - ./service-account.json:/app/config/service-account.json:ro

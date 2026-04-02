@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
@@ -17,9 +15,9 @@ import (
 	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
 
-	"github.com/duckdb/duckdb-go/v2"
-	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 type DB struct {
@@ -37,75 +35,61 @@ type ProcessedDocument struct {
 	CreatedAt     time.Time
 }
 
-func InitDB(filepath string) (*DB, error) {
-	slog.Info("Initializing database", "path", filepath)
-	db, err := sql.Open("duckdb", filepath)
+// InitDB opens a connection to the Nexus gateway using the PostgreSQL wire
+// protocol with simple-query mode (required by the gateway) and initialises
+// the schema in the caller's tenant DuckDB session.
+func InitDB(cfg config.NexusConfig) (*DB, error) {
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		cfg.Host, cfg.Port, cfg.TenantID, cfg.Password, cfg.DBName,
+	)
+	slog.Info("Connecting to Nexus gateway", "host", cfg.Host, "port", cfg.Port, "tenant", cfg.TenantID)
+
+	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		slog.Error("Failed to open database", "path", filepath, "error", err)
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to parse Nexus DSN: %w", err)
 	}
+	// The Nexus gateway only handles the simple-query protocol.
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+
+	db := stdlib.OpenDB(*connConfig)
 
 	if err := db.Ping(); err != nil {
-		slog.Error("Failed to ping database", "path", filepath, "error", err)
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+		db.Close()
+		return nil, fmt.Errorf("failed to ping Nexus gateway: %w", err)
 	}
 
-	// Install and load excel extension
-	_, err = db.Exec("INSTALL excel; LOAD excel;")
-	if err != nil {
+	// Install and load the Excel extension in the tenant DuckDB session.
+	if _, err := db.Exec("INSTALL excel; LOAD excel;"); err != nil {
 		slog.Warn("Failed to install/load excel extension", "error", err)
 	}
 
 	if err := createTables(db); err != nil {
-		slog.Error("Failed to create tables", "error", err)
+		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
-	slog.Info("Database initialized successfully")
+	slog.Info("Nexus gateway connection established successfully")
 	return &DB{Conn: db}, nil
 }
 
 func createTables(db *sql.DB) error {
-	// 1. Try to create the sequence (Native DuckDB path)
-	_, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_processed_documents_id;")
-
-	var query string
-	if err == nil {
-		// Success! This is a native DuckDB database.
-		slog.Debug("Creating tables using native DuckDB sequence")
-		query = `
-		CREATE TABLE IF NOT EXISTS processed_documents (
-			id INTEGER PRIMARY KEY DEFAULT nextval('seq_processed_documents_id'),
-			paperless_id INTEGER NOT NULL,
-			filename TEXT,
-			supplier TEXT,
-			date TEXT,
-			total_amount REAL,
-			raw_ocr_data TEXT,
-			extracted_text TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`
-	} else if strings.Contains(err.Error(), "SQLite") || strings.Contains(strings.ToLower(err.Error()), "sqlite") {
-		// This is a SQLite file being opened by DuckDB.
-		slog.Warn("Database identified as SQLite, using SQLite-compatible schema")
-		query = `
-		CREATE TABLE IF NOT EXISTS processed_documents (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			paperless_id INTEGER NOT NULL,
-			filename TEXT,
-			supplier TEXT,
-			date TEXT,
-			total_amount REAL,
-			raw_ocr_data TEXT,
-			extracted_text TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`
-	} else {
-		// Some other error
-		return fmt.Errorf("failed to initialize sequence: %w", err)
+	if _, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_processed_documents_id;"); err != nil {
+		return fmt.Errorf("failed to create sequence: %w", err)
 	}
 
-	_, err = db.Exec(query)
+	_, err := db.Exec(`
+	CREATE TABLE IF NOT EXISTS processed_documents (
+		id INTEGER PRIMARY KEY DEFAULT nextval('seq_processed_documents_id'),
+		paperless_id INTEGER NOT NULL,
+		filename TEXT,
+		supplier TEXT,
+		date TEXT,
+		total_amount REAL,
+		raw_ocr_data TEXT,
+		extracted_text TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`)
 	if err != nil {
 		return fmt.Errorf("failed to create processed_documents table: %w", err)
 	}
@@ -119,7 +103,7 @@ func (d *DB) SaveDocument(doc *ProcessedDocument) error {
 	slog.Debug("Saving processed document to DB", "paperless_id", doc.PaperlessID, "filename", doc.Filename)
 	query := `
 	INSERT INTO processed_documents (paperless_id, filename, supplier, date, total_amount, raw_ocr_data, extracted_text)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 	_, err := d.Conn.Exec(query, doc.PaperlessID, doc.Filename, doc.Supplier, doc.Date, doc.TotalAmount, doc.RawOCRData, doc.ExtractedText)
 	if err != nil {
@@ -130,7 +114,7 @@ func (d *DB) SaveDocument(doc *ProcessedDocument) error {
 }
 
 func (d *DB) IsDocumentProcessed(docID int) (bool, error) {
-	query := `SELECT COUNT(1) FROM processed_documents WHERE paperless_id = ?;`
+	query := `SELECT COUNT(1) FROM processed_documents WHERE paperless_id = $1;`
 	slog.Debug("Executing check statement", "query", query, "docID", docID)
 	var count int
 	if err := d.Conn.QueryRow(query, docID).Scan(&count); err != nil {
@@ -143,9 +127,10 @@ func (d *DB) Close() error {
 	return d.Conn.Close()
 }
 
-// ProcessPlatformExcel reads an Excel file using DuckDB and stores it into a platform-specific table.
+// ProcessPlatformExcel reads an Excel file via the Nexus gateway (DuckDB) and
+// stores it into a platform-specific table.
 func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, options config.PlatformConfig) error {
-	slog.Info("Storing Excel file via DuckDB into platform table", "platform", platform, "path", filePath)
+	slog.Info("Storing Excel file via Nexus gateway into platform table", "platform", platform, "path", filePath)
 
 	for _, importConfig := range options.ImportConfigs {
 
@@ -174,7 +159,7 @@ func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, o
 			return fmt.Errorf("failed to create platform table: %w", err)
 		}
 
-		// 3. Insert data (using BY NAME safely gracefully handles varying schema if supported, and normally duckdb ignores missing columns)
+		// 2. Insert data (BY NAME handles varying schema gracefully; DuckDB ignores missing columns)
 		insertStmt := fmt.Sprintf(`INSERT INTO %s BY NAME SELECT %d as document_id, * FROM read_xlsx('%s', %s);`, tableName, docID, filePath, optionStr)
 		slog.Debug("Executing insert statement", "query", insertStmt)
 		if _, err := d.Conn.Exec(insertStmt); err != nil {
@@ -203,7 +188,7 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 
 	if rangeStart != "" {
 		var rowCount int
-		query := fmt.Sprintf("SELECT COUNT(1) FROM %s WHERE document_id = ?", option.GetTableName(platform))
+		query := fmt.Sprintf("SELECT COUNT(1) FROM %s WHERE document_id = $1", option.GetTableName(platform))
 		slog.Debug("Executing query to get range end", "query", query, "docID", docID)
 		rows := d.Conn.QueryRow(query, docID)
 		if rows.Err() != nil {
@@ -234,72 +219,45 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 	return excel.Range{}, nil
 }
 
-// bigNumericDecodeHook converts *big.Int and *big.Float returned by the DuckDB
-// driver into the plain Go numeric type expected by the mapstructure target field.
-func bigNumericDecodeHook(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
-	switch v := data.(type) {
-	case *big.Int:
-		if v == nil {
-			return data, nil
-		}
-		switch to.Kind() { //nolint:exhaustive
-		case reflect.Float32, reflect.Float64:
-			f, _ := new(big.Float).SetInt(v).Float64()
-			return f, nil
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return v.Int64(), nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			return v.Uint64(), nil
-		}
-	case *big.Float:
-		if v == nil {
-			return data, nil
-		}
-		switch to.Kind() { //nolint:exhaustive
-		case reflect.Float32, reflect.Float64:
-			f, _ := v.Float64()
-			return f, nil
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			i, _ := v.Int64()
-			return i, nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			u, _ := v.Uint64()
-			return u, nil
-		}
-	}
-	return data, nil
-}
-
 // GetPlatformExcelRows retrieves the previously stored Excel rows from the platform table.
+// The struct expression is wrapped in to_json()::VARCHAR so that the result is
+// returned as a standard JSON string through the Nexus gateway.
 func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (accounting.PayoutInput, error) {
 	var payoutInput accounting.PayoutInput
 	for _, exportConfig := range options.ExportConfigs {
 		if exportConfig.ReaderConfigs == nil || len(exportConfig.ReaderConfigs) == 0 {
 			continue
 		}
-		var jsonMap duckdb.Composite[map[string]interface{}]
 		tableName := exportConfig.GetTableName(platform)
-		query := fmt.Sprintf("SELECT %s FROM %s WHERE document_id = ?", exportConfig.ToSelectExpresssions(), tableName)
+		query := fmt.Sprintf("SELECT to_json(%s)::VARCHAR FROM %s WHERE document_id = $1", exportConfig.ToSelectExpresssions(), tableName)
 		slog.Debug("Executing query to get platform table", "query", query, "docID", docID)
-		rows := d.Conn.QueryRow(query, docID)
-		if rows.Err() != nil {
-			return accounting.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", rows.Err())
+		row := d.Conn.QueryRow(query, docID)
+		if row.Err() != nil {
+			return accounting.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", row.Err())
 		}
-		rows.Scan(&jsonMap)
-		slog.Debug("Retrieved platform table", "rows", jsonMap.Get())
+		var jsonStr string
+		if err := row.Scan(&jsonStr); err != nil {
+			if err == sql.ErrNoRows {
+				slog.Warn("GetPlatformExcelRows: no rows found", "table", tableName, "docID", docID)
+				continue
+			}
+			return accounting.PayoutInput{}, fmt.Errorf("failed to scan platform table row: %w", err)
+		}
+		slog.Debug("Retrieved platform table JSON", "table", tableName, "json", jsonStr)
+		var rowData map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &rowData); err != nil {
+			return accounting.PayoutInput{}, fmt.Errorf("failed to parse JSON from platform table: %w", err)
+		}
 		dc := &mapstructure.DecoderConfig{
 			Result:           &payoutInput,
 			WeaklyTypedInput: true,
-			DecodeHook: mapstructure.ComposeDecodeHookFunc(
-				bigNumericDecodeHook,
-				mapstructure.StringToBasicTypeHookFunc(),
-			),
+			DecodeHook:       mapstructure.StringToBasicTypeHookFunc(),
 		}
 		decoder, err := mapstructure.NewDecoder(dc)
 		if err != nil {
 			return accounting.PayoutInput{}, fmt.Errorf("failed to create mapstructure decoder: %w", err)
 		}
-		if err := decoder.Decode(jsonMap.Get()); err != nil {
+		if err := decoder.Decode(rowData); err != nil {
 			slog.Warn("GetPlatformExcelRows: partial decode error (some fields may be zero)", "table", tableName, "err", err)
 		}
 	}
@@ -347,7 +305,7 @@ func marshalOrderedRows(rows []map[string]interface{}, headers []string) ([]byte
 // LoadRowsIntoTable creates (if necessary) a platform-specific DuckDB table from
 // rows returned by the LibreOffice parser service and bulk-inserts the rows
 // using DuckDB's read_json_auto table function — the same approach used for
-// read_xlsx in the DuckDB path.
+// read_xlsx in the Nexus gateway path.
 //
 // All column types are inferred by DuckDB from the JSON data.  Export-config
 // expressions should use TRY_CAST for numeric conversions where needed.
@@ -358,7 +316,7 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	}
 
 	// Serialize rows to a temporary JSON file so DuckDB can read them via
-	// read_json_auto — identical approach to how the DuckDB path uses read_xlsx.
+	// read_json_auto — identical approach to how the Nexus path uses read_xlsx.
 	// Use marshalOrderedRows when headers are available so that read_json_auto
 	// creates DuckDB table columns in the original xlsx column sequence.
 	var jsonBytes []byte

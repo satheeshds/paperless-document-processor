@@ -8,9 +8,18 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// NexusConfig holds the connection parameters for the Nexus gateway.
+type NexusConfig struct {
+	Host     string // NEXUS_HOST (default: localhost)
+	Port     string // NEXUS_PORT (default: 5433)
+	TenantID string // NEXUS_TENANT_ID
+	Password string // NEXUS_PASSWORD
+	DBName   string // NEXUS_DB (default: lake)
+}
+
 type Config struct {
 	Port                     string
-	DBPath                   string
+	Nexus                    NexusConfig
 	PaperlessURL             string
 	PaperlessUsername        string
 	PaperlessPassword        string
@@ -30,7 +39,7 @@ type Config struct {
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
 
-	// LibreOffice parser service (optional, used for payout XLSX when DuckDB fails)
+	// LibreOffice parser service (optional, used for payout XLSX when Nexus cannot read the file)
 	LibreOfficeURL      string
 	LibreOfficeDataPath string
 }
@@ -40,8 +49,14 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Port:                  getEnv("PORT", "80"),
-		DBPath:                getEnv("DB_PATH", "data/duck.db"),
+		Port: getEnv("PORT", "80"),
+		Nexus: NexusConfig{
+			Host:     getEnv("NEXUS_HOST", "localhost"),
+			Port:     getEnv("NEXUS_PORT", "5433"),
+			TenantID: os.Getenv("NEXUS_TENANT_ID"),
+			Password: os.Getenv("NEXUS_PASSWORD"),
+			DBName:   getEnv("NEXUS_DB", "lake"),
+		},
 		PaperlessURL:          os.Getenv("PAPERLESS_URL"),
 		PaperlessUsername:     os.Getenv("PAPERLESS_USERNAME"),
 		PaperlessPassword:     os.Getenv("PAPERLESS_PASSWORD"),
@@ -95,6 +110,12 @@ func (c *Config) validate() error {
 	}
 	if c.BankStatementProcessorID == "" {
 		return fmt.Errorf("BANK_STATEMENT_PROCESSOR_ID is required")
+	}
+	if c.Nexus.TenantID == "" {
+		return fmt.Errorf("NEXUS_TENANT_ID is required")
+	}
+	if c.Nexus.Password == "" {
+		return fmt.Errorf("NEXUS_PASSWORD is required")
 	}
 	return nil
 }
@@ -193,7 +214,7 @@ func (p ImportConfig) GetTableName(platform string) string {
 }
 
 // UseLibreOffice reports whether this platform should be processed by the
-// LibreOffice parser service rather than DuckDB.
+// LibreOffice parser service rather than the Nexus gateway.
 func (p PlatformConfig) UseLibreOffice() bool {
 	return strings.EqualFold(p.Method, "libreoffice")
 }

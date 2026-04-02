@@ -75,7 +75,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	// 3. Init DB
-	db, err := storage.InitDB(cfg.DBPath)
+	db, err := storage.InitDB(cfg.Nexus)
 	if err != nil {
 		slog.Error("Failed to init db", "error", err)
 		os.Exit(1)
