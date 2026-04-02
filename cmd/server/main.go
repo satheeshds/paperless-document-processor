@@ -17,8 +17,10 @@ import (
 	"paperless-document-processor/pkg/accounting"
 	"paperless-document-processor/pkg/docai"
 	"paperless-document-processor/pkg/excel"
+	"paperless-document-processor/pkg/gateway"
 	"paperless-document-processor/pkg/libreoffice"
 	"paperless-document-processor/pkg/paperless"
+	"paperless-document-processor/pkg/serviceaccount"
 	"paperless-document-processor/pkg/storage"
 	"paperless-document-processor/pkg/tika"
 
@@ -33,9 +35,12 @@ type Server struct {
 	accountingClient  *accounting.Client  // nil if not configured
 	tikaClient        *tika.Client        // nil if not configured
 	libreOfficeClient *libreoffice.Client // nil if not configured
-	customFields      map[string]int      // Name -> ID
-	tagIDs            map[string]int      // Name -> ID (e.g., "Swiggy" -> 3)
+	gatewayClient     *gateway.Client     // nil if not configured
+	svcAccountCache   *serviceaccount.Cache
+	customFields      map[string]int // Name -> ID
+	tagIDs            map[string]int // Name -> ID (e.g., "Swiggy" -> 3)
 	duckDBConfigs     map[int]config.PlatformConfig
+	tenantIDFieldID   int // Paperless custom field ID for "Tenant ID" (0 = not found)
 }
 
 type BillRequest struct {
@@ -111,6 +116,15 @@ func main() {
 		slog.Info("LibreOffice parser integration disabled (LIBREOFFICE_URL not set)")
 	}
 
+	// Init Nexus Gateway client (optional, used for service account rotation)
+	var gwClient *gateway.Client
+	if cfg.NexusGatewayURL != "" {
+		gwClient = gateway.NewClient(cfg.NexusGatewayURL, cfg.NexusAdminUser, cfg.NexusAdminPass)
+		slog.Info("Nexus Gateway integration enabled", "url", cfg.NexusGatewayURL)
+	} else {
+		slog.Info("Nexus Gateway integration disabled (NEXUS_GATEWAY_URL not set)")
+	}
+
 	srv := &Server{
 		cfg:               cfg,
 		db:                db,
@@ -119,6 +133,8 @@ func main() {
 		accountingClient:  acClient,
 		tikaClient:        tika.NewClient(cfg.TikaURL),
 		libreOfficeClient: loClient,
+		gatewayClient:     gwClient,
+		svcAccountCache:   serviceaccount.NewCache(),
 		customFields:      make(map[string]int),
 		tagIDs:            make(map[string]int),
 		duckDBConfigs:     make(map[int]config.PlatformConfig),
@@ -132,6 +148,12 @@ func main() {
 	} else {
 		for _, f := range fields {
 			srv.customFields[f.Name] = f.ID
+		}
+		if id, ok := srv.customFields["Tenant ID"]; ok {
+			srv.tenantIDFieldID = id
+			slog.Info("Tenant ID custom field found", "field_id", id)
+		} else {
+			slog.Warn("Tenant ID custom field not found in Paperless; per-tenant service accounts will be skipped")
 		}
 		slog.Info("Loaded custom fields", "count", len(srv.customFields))
 	}
@@ -291,7 +313,9 @@ func (s *Server) processBill(docID int, req BillRequest) {
 
 	// 4b. Create Bill in Accounting (optional)
 	if s.accountingClient != nil {
-		s.createLocalBill(docID, extracted, doc, req)
+		tenantID := extractTenantID(doc, s.tenantIDFieldID)
+		acClient := s.accountingClientForTenant(tenantID)
+		s.createLocalBill(docID, extracted, doc, req, acClient)
 	}
 
 	// 5. Update Paperless
@@ -383,7 +407,71 @@ func (s *Server) getOrCreateCorrespondent(name string) (*paperless.Correspondent
 	return s.paperlessClient.CreateCorrespondent(name)
 }
 
-func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest) {
+// extractTenantID returns the value of the "Tenant ID" custom field on doc.
+// It returns an empty string when the field is absent or fieldID is 0.
+func extractTenantID(doc *paperless.Document, fieldID int) string {
+	if fieldID == 0 {
+		return ""
+	}
+	for _, cf := range doc.CustomFields {
+		if cf.Field == fieldID {
+			if v, ok := cf.Value.(string); ok {
+				return v
+			}
+			if cf.Value != nil {
+				return fmt.Sprintf("%v", cf.Value)
+			}
+		}
+	}
+	return ""
+}
+
+// getServiceAccount returns cached credentials for tenantID, rotating them via
+// the nexus-gateway when no cached entry exists. It returns nil and a non-nil
+// error only when rotation is required but fails. When the gateway client is not
+// configured, (nil, nil) is returned to indicate that service-account auth
+// should be skipped.
+func (s *Server) getServiceAccount(tenantID string) (*serviceaccount.Credentials, error) {
+	if tenantID == "" {
+		return nil, nil
+	}
+	if creds, ok := s.svcAccountCache.Get(tenantID); ok {
+		return creds, nil
+	}
+	if s.gatewayClient == nil {
+		slog.Warn("Nexus Gateway not configured; skipping service account rotation", "tenant_id", tenantID)
+		return nil, nil
+	}
+	slog.Info("Rotating service account for tenant", "tenant_id", tenantID)
+	rotated, err := s.gatewayClient.RotateServiceAccount(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("rotate service account for tenant %q: %w", tenantID, err)
+	}
+	creds := &serviceaccount.Credentials{
+		Username: rotated.Username,
+		Password: rotated.Password,
+	}
+	s.svcAccountCache.Set(tenantID, creds)
+	return creds, nil
+}
+
+// accountingClientForTenant returns the accounting client configured with
+// service account credentials for tenantID. When tenantID is empty, the
+// gateway is not configured, or rotation fails, the default accounting client
+// is returned as a fallback so that processing continues.
+func (s *Server) accountingClientForTenant(tenantID string) *accounting.Client {
+	if tenantID != "" {
+		creds, err := s.getServiceAccount(tenantID)
+		if err != nil {
+			slog.Warn("Failed to get service account; falling back to default credentials", "tenant_id", tenantID, "error", err)
+		} else if creds != nil {
+			return s.accountingClient.WithCredentials(creds.Username, creds.Password)
+		}
+	}
+	return s.accountingClient
+}
+
+func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, acClient *accounting.Client) {
 	slog.Info("Creating local accounting bill", "document_id", docID, "supplier", extracted.Supplier)
 
 	// Resolve vendor contact
@@ -392,7 +480,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		contactName = "Unknown Vendor"
 	}
 
-	contactID, err := s.accountingClient.GetOrCreateVendor(contactName)
+	contactID, err := acClient.GetOrCreateVendor(contactName)
 	if err != nil {
 		slog.Error("Accounting contact error", "document_id", docID, "error", err)
 		return
@@ -435,7 +523,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		Items:      buildBillLineItems(extracted.LineItems),
 	}
 
-	billID, err := s.accountingClient.CreateBill(billInput)
+	billID, err := acClient.CreateBill(billInput)
 	if err != nil {
 		slog.Error("Accounting bill creation failed", "document_id", docID, "error", err)
 		return
@@ -762,7 +850,9 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 		slog.Debug("Extracted payout data from DB", "document_id", docID, "payout_input", payoutInput.String())
 
 		// 5. Send to Accounting
-		payoutID, err := s.accountingClient.CreatePayout(payoutInput)
+		tenantID := extractTenantID(doc, s.tenantIDFieldID)
+		acClient := s.accountingClientForTenant(tenantID)
+		payoutID, err := acClient.CreatePayout(payoutInput)
 		if err != nil {
 			slog.Error("Accounting payout creation failed", "document_id", docID, "error", err)
 			return
@@ -820,7 +910,14 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
-	// 1. Get Metadata & Content
+	// 1. Get Document (for custom fields including tenant_id)
+	paperlessDoc, err := s.paperlessClient.GetDocument(docID)
+	if err != nil {
+		slog.Error("Error getting bank statement document", "document_id", docID, "error", err)
+		return
+	}
+
+	// 2. Get Content
 	content, err := s.paperlessClient.DownloadDocument(docID, false)
 	if err != nil {
 		slog.Error("Error downloading bank statement", "document_id", docID, "error", err)
@@ -868,6 +965,9 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 
 	// 5. Send to Accounting
 	if s.accountingClient != nil && len(transactions) > 0 {
+		tenantID := extractTenantID(paperlessDoc, s.tenantIDFieldID)
+		acClient := s.accountingClientForTenant(tenantID)
+
 		// Resolve bank name from DocAI top-level entities (type = "bank_name")
 		bankName := "Bank"
 		for _, entity := range aiDoc.Entities {
@@ -884,7 +984,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 		}
 		slog.Info("Resolved bank name from DocAI", "bank_name", bankName)
 
-		bankAccountID, err := s.accountingClient.GetOrCreateBankAccount(bankName)
+		bankAccountID, err := acClient.GetOrCreateBankAccount(bankName)
 		if err != nil {
 			slog.Error("Failed to get/create bank account", "document_id", docID, "bank_name", bankName, "error", err)
 			// Continue without accounting — don't abort
@@ -912,7 +1012,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 					Description:     &desc,
 				}
 
-				txID, err := s.accountingClient.CreateTransaction(txnInput)
+				txID, err := acClient.CreateTransaction(txnInput)
 				if err != nil {
 					slog.Error("Failed to create transaction", "document_id", docID, "error", err, "date", date, "amount", amount, "type", txType)
 					continue

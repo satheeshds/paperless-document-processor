@@ -32,6 +32,11 @@ type Config struct {
 	// LibreOffice parser service (optional, used for payout XLSX when DuckDB fails)
 	LibreOfficeURL      string
 	LibreOfficeDataPath string
+
+	// Nexus Gateway (optional - service account rotation for per-tenant auth)
+	NexusGatewayURL  string
+	NexusAdminUser   string
+	NexusAdminPass   string
 }
 
 func Load() (*Config, error) {
@@ -60,6 +65,10 @@ func Load() (*Config, error) {
 		LibreOfficeDataPath: getEnv("LIBREOFFICE_DATA_PATH", "/data"),
 
 		BankStatementProcessorID: os.Getenv("BANK_STATEMENT_PROCESSOR_ID"),
+
+		NexusGatewayURL: os.Getenv("NEXUS_GATEWAY_URL"),
+		NexusAdminUser:  os.Getenv("NEXUS_ADMIN_USER"),
+		NexusAdminPass:  os.Getenv("NEXUS_ADMIN_PASS"),
 	}
 
 	if err := cfg.validate(); err != nil {

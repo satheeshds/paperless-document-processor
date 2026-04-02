@@ -174,6 +174,18 @@ func NewClient(baseURL, user, pass string) *Client {
 	}
 }
 
+// WithCredentials returns a copy of the client that uses the supplied username
+// and password instead of the original credentials.  The underlying HTTP
+// client is reused, so the copy is lightweight.
+func (c *Client) WithCredentials(user, pass string) *Client {
+	return &Client{
+		baseURL: c.baseURL,
+		user:    user,
+		pass:    pass,
+		client:  c.client,
+	}
+}
+
 func (c *Client) request(method, path string, body interface{}) (*http.Response, error) {
 	u := fmt.Sprintf("%s/api/v1/%s", c.baseURL, strings.TrimLeft(path, "/"))
 	var buf io.Reader

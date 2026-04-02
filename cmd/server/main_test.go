@@ -71,7 +71,7 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 				Amount:      "100.50",
 			},
 		},
-	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/123"})
+	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/123"}, accounting.NewClient(server.URL, "user", "pass"))
 
 	close(errCh)
 	for err := range errCh {
@@ -142,7 +142,7 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 		Entities: map[string]string{
 			"invoice_id": "INV-124",
 		},
-	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/124"})
+	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/124"}, accounting.NewClient(server.URL, "user", "pass"))
 
 	close(errCh)
 	for err := range errCh {
