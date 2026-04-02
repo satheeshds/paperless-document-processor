@@ -2,7 +2,6 @@ package paperless
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -82,10 +81,6 @@ func NewClient(baseURL, username, password string) *Client {
 	}
 }
 
-func (c *Client) basicAuthHeader() string {
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(c.username+":"+c.password))
-}
-
 func (c *Client) request(method, path string, body interface{}) (*http.Response, error) {
 	u := fmt.Sprintf("%s/api/%s", c.baseURL, path)
 	slog.Debug("Paperless API request", "method", method, "url", u)
@@ -106,7 +101,7 @@ func (c *Client) request(method, path string, body interface{}) (*http.Response,
 		return nil, err
 	}
 
-	req.Header.Set("Authorization", c.basicAuthHeader())
+	req.SetBasicAuth(c.username, c.password)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -175,7 +170,7 @@ func (c *Client) DownloadDocument(id int, original bool) ([]byte, error) {
 		slog.Error("Failed to create download request", "id", id, "error", err)
 		return nil, err
 	}
-	req.Header.Set("Authorization", c.basicAuthHeader())
+	req.SetBasicAuth(c.username, c.password)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
