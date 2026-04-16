@@ -94,7 +94,8 @@ func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 
 	db := stdlib.OpenDB(*connConfig)
 	db.SetMaxOpenConns(1)
-	slog.Info("Opened per-request tenant DB connection", "tenant_id", tenantID)
+	db.SetMaxIdleConns(1)
+	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
 	return &DB{Conn: db}, nil
 }
 
