@@ -39,15 +39,18 @@ type Server struct {
 }
 
 type BillRequest struct {
-	DocURL string `json:"doc_url"`
+	DocURL   string `json:"doc_url"`
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 type PayoutRequest struct {
-	DocURL string `json:"doc_url"`
+	DocURL   string `json:"doc_url"`
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 type BankStatementRequest struct {
-	DocURL string `json:"doc_url"`
+	DocURL   string `json:"doc_url"`
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 func main() {
@@ -227,14 +230,32 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
+	// Open a per-request tenant DB when the caller specifies a tenant_id;
+	// the tenant_id is used as the PostgreSQL username so Nexus routes the
+	// connection to the right DuckDB namespace.  Falls back to the shared
+	// service-account DB when no tenant_id is provided.
+	db := s.db
+	if req.TenantID != "" {
+		tenantDB, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+		if err != nil {
+			slog.Error("Failed to open tenant DB for bill request", "tenant_id", req.TenantID, "error", err)
+			http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+			return
+		}
+		db = tenantDB
+	}
+
 	// Run processing asynchronously
-	go s.processBill(docID, req)
+	go s.processBill(docID, req, db)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Processing started"))
 }
 
-func (s *Server) processBill(docID int, req BillRequest) {
+func (s *Server) processBill(docID int, req BillRequest, db *storage.DB) {
+	if db != s.db {
+		defer db.Close()
+	}
 	slog.Info("Starting processing", "document_id", docID)
 
 	// 1. Get Metadata
@@ -284,7 +305,7 @@ func (s *Server) processBill(docID int, req BillRequest) {
 		ExtractedText: extracted.Text,
 	}
 
-	if err := s.db.SaveDocument(dbDoc); err != nil {
+	if err := db.SaveDocument(dbDoc); err != nil {
 		slog.Error("DB Save error", "document_id", docID, "error", err)
 		// Continue anyway? Yes.
 	}
@@ -613,17 +634,31 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	go s.processPayout(docID, req)
+	db := s.db
+	if req.TenantID != "" {
+		tenantDB, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+		if err != nil {
+			slog.Error("Failed to open tenant DB for payout request", "tenant_id", req.TenantID, "error", err)
+			http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+			return
+		}
+		db = tenantDB
+	}
+
+	go s.processPayout(docID, req, db)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Payout processing started"))
 }
 
-func (s *Server) processPayout(docID int, req PayoutRequest) {
+func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
+	if db != s.db {
+		defer db.Close()
+	}
 	slog.Info("Starting payout processing", "document_id", docID)
 
 	// 1. if the document already processed, return no need to process again
-	if processed, err := s.db.IsDocumentProcessed(docID); err == nil && processed {
+	if processed, err := db.IsDocumentProcessed(docID); err == nil && processed {
 		slog.Warn("Document already processed, skipping it", "document_id", docID)
 		return
 	}
@@ -733,7 +768,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 				resultRowCounts[i] = len(result.Rows)
 
 				tableName := importConfig.GetTableName(platform)
-				if err := s.db.LoadRowsIntoTable(docID, tableName, result); err != nil {
+				if err := db.LoadRowsIntoTable(docID, tableName, result); err != nil {
 					slog.Error("Failed to load LibreOffice rows into table", "document_id", docID, "table", tableName, "error", err)
 					return
 				}
@@ -741,13 +776,13 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 		} else {
 			slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
 
-			if err := s.db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
+			if err := db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
 				slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
 				return
 			}
 		}
 
-		payoutInput, err := s.db.GetPlatformExcelRows(docID, platform, option)
+		payoutInput, err := db.GetPlatformExcelRows(docID, platform, option)
 		if err != nil {
 			slog.Error("Failed to get excel rows", "document_id", docID, "error", err)
 			return
@@ -773,7 +808,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 			PaperlessID: docID,
 			Filename:    filename,
 		}
-		err = s.db.SaveDocument(&doc)
+		err = db.SaveDocument(&doc)
 
 		slog.Info("Local accounting payout created from Excel", "document_id", docID, "payout_id", payoutID)
 	} else {
@@ -811,13 +846,27 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	go s.processBankStatement(docID, req)
+	db := s.db
+	if req.TenantID != "" {
+		tenantDB, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+		if err != nil {
+			slog.Error("Failed to open tenant DB for bank statement request", "tenant_id", req.TenantID, "error", err)
+			http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+			return
+		}
+		db = tenantDB
+	}
+
+	go s.processBankStatement(docID, req, db)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Bank statement processing started"))
 }
 
-func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
+func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB) {
+	if db != s.db {
+		defer db.Close()
+	}
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
 	// 1. Get Metadata & Content
@@ -856,7 +905,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 		ExtractedText: aiDoc.Text,
 	}
 
-	err = s.db.SaveDocument(doc)
+	err = db.SaveDocument(doc)
 	if err != nil {
 		slog.Error("Failed to save document", "document_id", docID, "error", err)
 		return

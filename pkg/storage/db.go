@@ -35,15 +35,14 @@ type ProcessedDocument struct {
 	CreatedAt     time.Time
 }
 
-// InitDB opens a connection to the Nexus gateway using the PostgreSQL wire
-// protocol with simple-query mode (required by the gateway) and initialises
-// the schema in the caller's tenant DuckDB session.
+// InitDB opens a connection to the Nexus gateway using the service-account
+// credentials from cfg and initialises the schema in that DuckDB session.
 func InitDB(cfg config.NexusConfig) (*DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.Host, cfg.Port, cfg.TenantID, cfg.Password, cfg.DBName,
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName,
 	)
-	slog.Info("Connecting to Nexus gateway", "host", cfg.Host, "port", cfg.Port, "tenant", cfg.TenantID)
+	slog.Info("Connecting to Nexus gateway", "host", cfg.Host, "port", cfg.Port, "user", cfg.User)
 
 	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
@@ -73,6 +72,29 @@ func InitDB(cfg config.NexusConfig) (*DB, error) {
 	}
 
 	slog.Info("Nexus gateway connection established successfully")
+	return &DB{Conn: db}, nil
+}
+
+// OpenWithTenant opens a single-connection DB scoped to the given tenant.
+// It uses tenantID as the PostgreSQL username (which routes to the tenant's
+// DuckDB namespace in Nexus) and the service-account password from cfg.
+// The connection pool is capped at one connection, matching the portal pattern
+// for per-request connections (see satheeshds/portal db/db.go OpenWithCredentials).
+// Callers are responsible for calling Close when the request is complete.
+func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		cfg.Host, cfg.Port, tenantID, cfg.Password, cfg.DBName,
+	)
+	connConfig, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse tenant DSN: %w", err)
+	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+
+	db := stdlib.OpenDB(*connConfig)
+	db.SetMaxOpenConns(1)
+	slog.Info("Opened per-request tenant DB connection", "tenant_id", tenantID)
 	return &DB{Conn: db}, nil
 }
 

@@ -13,7 +13,7 @@ services:
       # Nexus gateway (see github.com/satheeshds/nexus)
       - NEXUS_HOST=${NEXUS_HOST:-nexus-gateway}
       - NEXUS_PORT=${NEXUS_PORT:-5433}
-      - NEXUS_TENANT_ID=${NEXUS_TENANT_ID}
+      - NEXUS_USER=${NEXUS_USER:-processor}
       - NEXUS_PASSWORD=${NEXUS_PASSWORD}
       - NEXUS_DB=${NEXUS_DB:-lake}
       # Pass these from .env file or host environment

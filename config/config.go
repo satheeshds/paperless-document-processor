@@ -12,7 +12,7 @@ import (
 type NexusConfig struct {
 	Host     string // NEXUS_HOST (default: localhost)
 	Port     string // NEXUS_PORT (default: 5433)
-	TenantID string // NEXUS_TENANT_ID
+	User     string // NEXUS_USER – service-account username (default: processor)
 	Password string // NEXUS_PASSWORD
 	DBName   string // NEXUS_DB (default: lake)
 }
@@ -53,7 +53,7 @@ func Load() (*Config, error) {
 		Nexus: NexusConfig{
 			Host:     getEnv("NEXUS_HOST", "localhost"),
 			Port:     getEnv("NEXUS_PORT", "5433"),
-			TenantID: os.Getenv("NEXUS_TENANT_ID"),
+			User:     getEnv("NEXUS_USER", "processor"),
 			Password: os.Getenv("NEXUS_PASSWORD"),
 			DBName:   getEnv("NEXUS_DB", "lake"),
 		},
@@ -110,9 +110,6 @@ func (c *Config) validate() error {
 	}
 	if c.BankStatementProcessorID == "" {
 		return fmt.Errorf("BANK_STATEMENT_PROCESSOR_ID is required")
-	}
-	if c.Nexus.TenantID == "" {
-		return fmt.Errorf("NEXUS_TENANT_ID is required")
 	}
 	if c.Nexus.Password == "" {
 		return fmt.Errorf("NEXUS_PASSWORD is required")
