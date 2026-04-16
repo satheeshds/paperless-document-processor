@@ -12,9 +12,15 @@ import (
 type NexusConfig struct {
 	Host     string // NEXUS_HOST (default: localhost)
 	Port     string // NEXUS_PORT (default: 5433)
-	User     string // NEXUS_USER – service-account username (default: processor)
-	Password string // NEXUS_PASSWORD
+	User     string // NEXUS_USER – service-account username used by InitDB (default: processor)
+	Password string // NEXUS_PASSWORD – service-account password used by InitDB
 	DBName   string // NEXUS_DB (default: lake)
+
+	// ControlURL and AdminAPIKey are used to rotate per-tenant service-account
+	// credentials via the nexus-control API before opening per-request connections.
+	// See OpenWithTenant in pkg/storage/db.go.
+	ControlURL  string // NEXUS_CONTROL_URL – base URL of nexus-control (e.g. http://nexus-control:8080)
+	AdminAPIKey string // ADMIN_API_KEY – admin key sent as X-Admin-API-Key
 }
 
 type Config struct {
@@ -51,11 +57,13 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port: getEnv("PORT", "80"),
 		Nexus: NexusConfig{
-			Host:     getEnv("NEXUS_HOST", "localhost"),
-			Port:     getEnv("NEXUS_PORT", "5433"),
-			User:     getEnv("NEXUS_USER", "processor"),
-			Password: os.Getenv("NEXUS_PASSWORD"),
-			DBName:   getEnv("NEXUS_DB", "lake"),
+			Host:        getEnv("NEXUS_HOST", "localhost"),
+			Port:        getEnv("NEXUS_PORT", "5433"),
+			User:        getEnv("NEXUS_USER", "processor"),
+			Password:    os.Getenv("NEXUS_PASSWORD"),
+			DBName:      getEnv("NEXUS_DB", "lake"),
+			ControlURL:  strings.TrimRight(os.Getenv("NEXUS_CONTROL_URL"), "/"),
+			AdminAPIKey: os.Getenv("ADMIN_API_KEY"),
 		},
 		PaperlessURL:          os.Getenv("PAPERLESS_URL"),
 		PaperlessUsername:     os.Getenv("PAPERLESS_USERNAME"),

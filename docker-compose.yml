@@ -16,6 +16,9 @@ services:
       - NEXUS_USER=${NEXUS_USER:-processor}
       - NEXUS_PASSWORD=${NEXUS_PASSWORD}
       - NEXUS_DB=${NEXUS_DB:-lake}
+      # Nexus control API (required for per-tenant service account rotation)
+      - NEXUS_CONTROL_URL=${NEXUS_CONTROL_URL}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
       # Pass these from .env file or host environment
       - PAPERLESS_URL=${PAPERLESS_URL}
       - PAPERLESS_USERNAME=${PAPERLESS_USERNAME}

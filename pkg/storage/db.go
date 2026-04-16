@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -75,16 +77,76 @@ func InitDB(cfg config.NexusConfig) (*DB, error) {
 	return &DB{Conn: db}, nil
 }
 
+// serviceAccount holds the rotated credentials returned by the nexus-control API.
+type serviceAccount struct {
+	Username string `json:"service_id"`
+	Password string `json:"service_api_key"`
+}
+
+// nexusHTTPClient is a shared HTTP client for nexus-control admin API calls.
+var nexusHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// RotateTenantServiceAccount calls the nexus-control admin API to rotate the
+// service account for the given tenant, returning fresh credentials.
+// This matches the pattern in satheeshds/portal db/scheduler.go.
+func RotateTenantServiceAccount(controlURL, adminKey, tenantID string) (*serviceAccount, error) {
+	if controlURL == "" {
+		return nil, fmt.Errorf("NEXUS_CONTROL_URL is not configured")
+	}
+	if adminKey == "" {
+		return nil, fmt.Errorf("ADMIN_API_KEY is not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/admin/tenants/%s/service-account/rotate", controlURL, tenantID)
+	req, err := http.NewRequest(http.MethodPost, endpoint, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build rotate request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-API-Key", adminKey)
+
+	resp, err := nexusHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rotate service account request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("rotate service account returned status %d (could not read body: %w)", resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("rotate service account returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sa serviceAccount
+	if err := json.NewDecoder(resp.Body).Decode(&sa); err != nil {
+		return nil, fmt.Errorf("failed to decode service account response: %w", err)
+	}
+	if sa.Username == "" || sa.Password == "" {
+		return nil, fmt.Errorf("rotate service account response missing credentials for tenant %s", tenantID)
+	}
+
+	slog.Debug("rotated service account", "tenant_id", tenantID)
+	return &sa, nil
+}
+
 // OpenWithTenant opens a single-connection DB scoped to the given tenant.
-// It uses tenantID as the PostgreSQL username (which routes to the tenant's
-// DuckDB namespace in Nexus) and the service-account password from cfg.
-// The connection pool is capped at one connection, matching the portal pattern
-// for per-request connections (see satheeshds/portal db/db.go OpenWithCredentials).
+// It first rotates the service account for the tenant via the nexus-control API
+// (using cfg.ControlURL and cfg.AdminAPIKey) to obtain fresh credentials, then
+// opens a pgx connection using those credentials. This matches the pattern in
+// satheeshds/portal db/db.go OpenWithCredentials + db/scheduler.go RotateTenantServiceAccount.
 // Callers are responsible for calling Close when the request is complete.
 func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
+	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
+	}
+
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.Host, cfg.Port, tenantID, cfg.Password, cfg.DBName,
+		cfg.Host, cfg.Port, creds.Username, creds.Password, cfg.DBName,
 	)
 	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
