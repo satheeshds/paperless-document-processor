@@ -13,8 +13,6 @@ services:
       # Nexus gateway (see github.com/satheeshds/nexus)
       - NEXUS_HOST=${NEXUS_HOST:-nexus-gateway}
       - NEXUS_PORT=${NEXUS_PORT:-5433}
-      - NEXUS_USER=${NEXUS_USER:-processor}
-      - NEXUS_PASSWORD=${NEXUS_PASSWORD}
       - NEXUS_DB=${NEXUS_DB:-lake}
       # Nexus control API (required for per-tenant service account rotation)
       - NEXUS_CONTROL_URL=${NEXUS_CONTROL_URL}

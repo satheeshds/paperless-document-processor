@@ -27,7 +27,6 @@ import (
 
 type Server struct {
 	cfg               *config.Config
-	db                *storage.DB
 	paperlessClient   *paperless.Client
 	docAIClient       *docai.Client
 	accountingClient  *accounting.Client  // nil if not configured
@@ -77,13 +76,8 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	slog.SetDefault(logger)
 
-	// 3. Init DB
-	db, err := storage.InitDB(cfg.Nexus)
-	if err != nil {
-		slog.Error("Failed to init db", "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
+	// 3. Init DB (validates config; per-request connections are opened via OpenWithTenant)
+	storage.ValidateConfig(cfg.Nexus)
 
 	// 3. Init Clients
 	pClient := paperless.NewClient(cfg.PaperlessURL, cfg.PaperlessUsername, cfg.PaperlessPassword)
@@ -116,7 +110,6 @@ func main() {
 
 	srv := &Server{
 		cfg:               cfg,
-		db:                db,
 		paperlessClient:   pClient,
 		docAIClient:       dClient,
 		accountingClient:  acClient,
@@ -230,19 +223,18 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
-	// Open a per-request tenant DB when the caller specifies a tenant_id;
-	// the tenant_id is used as the PostgreSQL username so Nexus routes the
-	// connection to the right DuckDB namespace.  Falls back to the shared
-	// service-account DB when no tenant_id is provided.
-	db := s.db
-	if req.TenantID != "" {
-		tenantDB, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
-		if err != nil {
-			slog.Error("Failed to open tenant DB for bill request", "tenant_id", req.TenantID, "error", err)
-			http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
-			return
-		}
-		db = tenantDB
+	if req.TenantID == "" {
+		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Open a per-request tenant DB by rotating the service-account credentials
+	// for the given tenant via the nexus-control API.
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+	if err != nil {
+		slog.Error("Failed to open tenant DB for bill request", "tenant_id", req.TenantID, "error", err)
+		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+		return
 	}
 
 	// Run processing asynchronously
@@ -253,9 +245,7 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processBill(docID int, req BillRequest, db *storage.DB) {
-	if db != s.db {
-		defer db.Close()
-	}
+	defer db.Close()
 	slog.Info("Starting processing", "document_id", docID)
 
 	// 1. Get Metadata
@@ -634,15 +624,16 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	db := s.db
-	if req.TenantID != "" {
-		tenantDB, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
-		if err != nil {
-			slog.Error("Failed to open tenant DB for payout request", "tenant_id", req.TenantID, "error", err)
-			http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
-			return
-		}
-		db = tenantDB
+	if req.TenantID == "" {
+		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+		return
+	}
+
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+	if err != nil {
+		slog.Error("Failed to open tenant DB for payout request", "tenant_id", req.TenantID, "error", err)
+		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+		return
 	}
 
 	go s.processPayout(docID, req, db)
@@ -652,9 +643,7 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
-	if db != s.db {
-		defer db.Close()
-	}
+	defer db.Close()
 	slog.Info("Starting payout processing", "document_id", docID)
 
 	// 1. if the document already processed, return no need to process again
@@ -846,15 +835,16 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	db := s.db
-	if req.TenantID != "" {
-		tenantDB, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
-		if err != nil {
-			slog.Error("Failed to open tenant DB for bank statement request", "tenant_id", req.TenantID, "error", err)
-			http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
-			return
-		}
-		db = tenantDB
+	if req.TenantID == "" {
+		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+		return
+	}
+
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+	if err != nil {
+		slog.Error("Failed to open tenant DB for bank statement request", "tenant_id", req.TenantID, "error", err)
+		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+		return
 	}
 
 	go s.processBankStatement(docID, req, db)
@@ -864,9 +854,7 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB) {
-	if db != s.db {
-		defer db.Close()
-	}
+	defer db.Close()
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
 	// 1. Get Metadata & Content

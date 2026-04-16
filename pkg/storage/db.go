@@ -37,44 +37,12 @@ type ProcessedDocument struct {
 	CreatedAt     time.Time
 }
 
-// InitDB opens a connection to the Nexus gateway using the service-account
-// credentials from cfg and initialises the schema in that DuckDB session.
-func InitDB(cfg config.NexusConfig) (*DB, error) {
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName,
-	)
-	slog.Info("Connecting to Nexus gateway", "host", cfg.Host, "port", cfg.Port, "user", cfg.User)
-
-	connConfig, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse Nexus DSN: %w", err)
-	}
-	// QueryExecModeExec sends Parse→Bind→Execute→Sync for every query.
-	// This avoids binary-format OID negotiation (no Describe step) and
-	// prevents pgx from checking standard_conforming_strings, which the
-	// Nexus gateway does not advertise.
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
-
-	db := stdlib.OpenDB(*connConfig)
-
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping Nexus gateway: %w", err)
-	}
-
-	// Install and load the Excel extension in the tenant DuckDB session.
-	if _, err := db.Exec("INSTALL excel; LOAD excel;"); err != nil {
-		slog.Warn("Failed to install/load excel extension", "error", err)
-	}
-
-	if err := createTables(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	slog.Info("Nexus gateway connection established successfully")
-	return &DB{Conn: db}, nil
+// ValidateConfig logs the Nexus gateway configuration. All DB connections are
+// opened per-request via OpenWithTenant (which rotates service-account
+// credentials via the nexus-control API), so no static startup connection is
+// required.
+func ValidateConfig(cfg config.NexusConfig) {
+	slog.Info("Nexus gateway configured", "host", cfg.Host, "port", cfg.Port, "control_url", cfg.ControlURL)
 }
 
 // serviceAccount holds the rotated credentials returned by the nexus-control API.

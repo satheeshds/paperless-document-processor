@@ -10,14 +10,12 @@ import (
 
 // NexusConfig holds the connection parameters for the Nexus gateway.
 type NexusConfig struct {
-	Host     string // NEXUS_HOST (default: localhost)
-	Port     string // NEXUS_PORT (default: 5433)
-	User     string // NEXUS_USER – service-account username used by InitDB (default: processor)
-	Password string // NEXUS_PASSWORD – service-account password used by InitDB
-	DBName   string // NEXUS_DB (default: lake)
+	Host   string // NEXUS_HOST (default: localhost)
+	Port   string // NEXUS_PORT (default: 5433)
+	DBName string // NEXUS_DB (default: lake)
 
 	// ControlURL and AdminAPIKey are used to rotate per-tenant service-account
-	// credentials via the nexus-control API before opening per-request connections.
+	// credentials via the nexus-control API before opening connections.
 	// See OpenWithTenant in pkg/storage/db.go.
 	ControlURL  string // NEXUS_CONTROL_URL – base URL of nexus-control (e.g. http://nexus-control:8080)
 	AdminAPIKey string // ADMIN_API_KEY – admin key sent as X-Admin-API-Key
@@ -59,8 +57,6 @@ func Load() (*Config, error) {
 		Nexus: NexusConfig{
 			Host:        getEnv("NEXUS_HOST", "localhost"),
 			Port:        getEnv("NEXUS_PORT", "5433"),
-			User:        getEnv("NEXUS_USER", "processor"),
-			Password:    os.Getenv("NEXUS_PASSWORD"),
 			DBName:      getEnv("NEXUS_DB", "lake"),
 			ControlURL:  strings.TrimRight(os.Getenv("NEXUS_CONTROL_URL"), "/"),
 			AdminAPIKey: os.Getenv("ADMIN_API_KEY"),
@@ -119,8 +115,11 @@ func (c *Config) validate() error {
 	if c.BankStatementProcessorID == "" {
 		return fmt.Errorf("BANK_STATEMENT_PROCESSOR_ID is required")
 	}
-	if c.Nexus.Password == "" {
-		return fmt.Errorf("NEXUS_PASSWORD is required")
+	if c.Nexus.ControlURL == "" {
+		return fmt.Errorf("NEXUS_CONTROL_URL is required")
+	}
+	if c.Nexus.AdminAPIKey == "" {
+		return fmt.Errorf("ADMIN_API_KEY is required")
 	}
 	return nil
 }
