@@ -74,13 +74,9 @@ func InitDB(cfg config.NexusConfig) (*DB, error) {
 }
 
 func createTables(db *sql.DB) error {
-	if _, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_processed_documents_id;"); err != nil {
-		return fmt.Errorf("failed to create sequence: %w", err)
-	}
-
 	_, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS processed_documents (
-		id INTEGER PRIMARY KEY DEFAULT nextval('seq_processed_documents_id'),
+		id INTEGER PRIMARY KEY,
 		paperless_id INTEGER NOT NULL,
 		filename TEXT,
 		supplier TEXT,
