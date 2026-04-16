@@ -49,8 +49,11 @@ func InitDB(cfg config.NexusConfig) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse Nexus DSN: %w", err)
 	}
-	// The Nexus gateway only handles the simple-query protocol.
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	// QueryExecModeExec sends Parse→Bind→Execute→Sync for every query.
+	// This avoids binary-format OID negotiation (no Describe step) and
+	// prevents pgx from checking standard_conforming_strings, which the
+	// Nexus gateway does not advertise.
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 
 	db := stdlib.OpenDB(*connConfig)
 
