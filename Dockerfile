@@ -3,8 +3,6 @@
 # Build Stage
 FROM golang:1.24-bookworm AS builder
 
-ARG COMMIT_SHA=unknown
-
 WORKDIR /app
 
 # Install build dependencies for DuckDB (C++)
