@@ -4,7 +4,7 @@ TAG ?= latest
 DOCKER ?= docker
 COMPOSE ?= docker compose
 ENV_FILE ?= .env
-COMMIT_SHA ?= $(shell git rev-parse --short HEAD)
+COMMIT_SHA ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 export DOCKER_BUILDKIT ?= 1
 
