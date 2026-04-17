@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"paperless-document-processor/pkg/accounting"
 	"paperless-document-processor/pkg/docai"
 	"paperless-document-processor/pkg/paperless"
+	"paperless-document-processor/pkg/storage"
 )
 
 type receivedBillInput struct {
@@ -218,4 +221,105 @@ type unexpectedRequestError struct {
 
 func (e *unexpectedRequestError) Error() string {
 	return "unexpected request: " + e.method + " " + e.path
+}
+
+func newTestDB(t *testing.T) *storage.DB {
+	t.Helper()
+	db, err := storage.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("failed to init test DB: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestHandleCreateServiceAccount_ReturnsPlainAPIKey(t *testing.T) {
+	db := newTestDB(t)
+	s := &Server{db: db}
+
+	body, _ := json.Marshal(CreateServiceAccountRequest{Name: "ingestion-service"})
+	req := httptest.NewRequest(http.MethodPost, "/service-accounts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.handleCreateServiceAccount(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp CreateServiceAccountResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.APIKey == "" {
+		t.Fatal("expected non-empty api_key in response")
+	}
+	if len(resp.APIKey) < 32 {
+		t.Errorf("expected api_key length >= 32, got %d", len(resp.APIKey))
+	}
+	if resp.Name != "ingestion-service" {
+		t.Errorf("expected name ingestion-service, got %s", resp.Name)
+	}
+	if resp.ID == 0 {
+		t.Error("expected non-zero id in response")
+	}
+	if resp.CreatedAt == "" {
+		t.Error("expected non-empty created_at in response")
+	}
+}
+
+func TestHandleCreateServiceAccount_MissingName(t *testing.T) {
+	db := newTestDB(t)
+	s := &Server{db: db}
+
+	body, _ := json.Marshal(CreateServiceAccountRequest{Name: ""})
+	req := httptest.NewRequest(http.MethodPost, "/service-accounts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.handleCreateServiceAccount(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing name, got %d", w.Code)
+	}
+}
+
+func TestHandleCreateServiceAccount_InvalidJSON(t *testing.T) {
+	db := newTestDB(t)
+	s := &Server{db: db}
+
+	req := httptest.NewRequest(http.MethodPost, "/service-accounts", strings.NewReader("{invalid"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.handleCreateServiceAccount(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid JSON, got %d", w.Code)
+	}
+}
+
+func TestGenerateAPIKey_IsUnique(t *testing.T) {
+	key1, err1 := generateAPIKey()
+	key2, err2 := generateAPIKey()
+	if err1 != nil || err2 != nil {
+		t.Fatalf("generateAPIKey error: %v / %v", err1, err2)
+	}
+	if key1 == key2 {
+		t.Error("expected unique API keys, got identical values")
+	}
+}
+
+func TestHashAPIKey_IsConsistent(t *testing.T) {
+	key := "testkey123"
+	h1 := hashAPIKey(key)
+	h2 := hashAPIKey(key)
+	if h1 != h2 {
+		t.Errorf("expected consistent hash, got %s and %s", h1, h2)
+	}
+	if h1 == key {
+		t.Error("hash should not equal the original key")
+	}
 }
