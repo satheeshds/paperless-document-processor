@@ -2,10 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,7 +23,16 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
+
+//go:embed migrations/*.sql
+var embedMigrations embed.FS
+
+func init() {
+	// Silence goose's default logger; we use slog.
+	goose.SetLogger(goose.NopLogger())
+}
 
 type DB struct {
 	Conn *sql.DB
@@ -125,30 +137,45 @@ func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 	db := stdlib.OpenDB(*connConfig)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+
+	if err := MigrateDB(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate tenant schema for %s: %w", tenantID, err)
+	}
+
 	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
 	return &DB{Conn: db}, nil
 }
 
-func createTables(db *sql.DB) error {
-	_, err := db.Exec(`
-	CREATE TABLE IF NOT EXISTS processed_documents (
-		id INTEGER PRIMARY KEY,
-		paperless_id INTEGER NOT NULL,
-		filename TEXT,
-		supplier TEXT,
-		date TEXT,
-		total_amount REAL,
-		raw_ocr_data TEXT,
-		extracted_text TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`)
+// MigrateDB applies all pending up-migrations to the provided database using
+// embedded SQL files (pkg/storage/migrations/*.sql).  It is idempotent: goose
+// records applied versions in a goose_db_version table and skips them on
+// subsequent calls.
+func MigrateDB(db *sql.DB) error {
+	migFS, err := fs.Sub(embedMigrations, "migrations")
 	if err != nil {
-		return fmt.Errorf("failed to create processed_documents table: %w", err)
+		return fmt.Errorf("failed to create migration filesystem: %w", err)
 	}
 
-	// Create index
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_paperless_id ON processed_documents(paperless_id);`)
-	return err
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migFS)
+	if err != nil {
+		return fmt.Errorf("failed to create goose provider: %w", err)
+	}
+
+	results, err := provider.Up(context.Background())
+	if err != nil {
+		return fmt.Errorf("database migration failed: %w", err)
+	}
+
+	for _, r := range results {
+		slog.Info("applied migration", "version", r.Source.Version, "duration", r.Duration)
+	}
+
+	if len(results) > 0 {
+		slog.Info("database migrations complete", "applied", len(results))
+	}
+
+	return nil
 }
 
 func (d *DB) SaveDocument(doc *ProcessedDocument) error {
