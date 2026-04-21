@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS processed_documents (
     total_amount REAL,
     raw_ocr_data TEXT,
     extracted_text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP
 );
 
 -- +goose Down
