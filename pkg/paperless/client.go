@@ -279,6 +279,24 @@ func (c *Client) GetTags() ([]Tag, error) {
 	return allTags, nil
 }
 
+func (c *Client) CreateTag(name string) (*Tag, error) {
+	slog.Info("Creating tag in Paperless", "name", name)
+	body := map[string]interface{}{"name": name}
+	resp, err := c.request("POST", "tags/", body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var tag Tag
+	if err := json.NewDecoder(resp.Body).Decode(&tag); err != nil {
+		slog.Error("Failed to decode tag response", "name", name, "error", err)
+		return nil, err
+	}
+	return &tag, nil
+}
+
+
 func (c *Client) GetCorrespondent(name string) (*Correspondent, error) {
 	// Search by name (slug search is better if we can normalize, but name search via list with query param)
 	// paperless api allows filtering correspondents? yes: /api/correspondents/?name__icontains=...
@@ -327,6 +345,7 @@ type DocumentUpdate struct {
 	Content       *string               `json:"content,omitempty"`
 	Correspondent *int                  `json:"correspondent,omitempty"`
 	CustomFields  []CustomFieldInstance `json:"custom_fields,omitempty"`
+	Tags          []int                 `json:"tags,omitempty"`
 }
 
 func (c *Client) UpdateDocument(id int, update DocumentUpdate) error {

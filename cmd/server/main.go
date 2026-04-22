@@ -38,18 +38,15 @@ type Server struct {
 }
 
 type BillRequest struct {
-	DocURL   string `json:"doc_url"`
-	TenantID string `json:"tenant_id,omitempty"`
+	DocURL string `json:"doc_url"`
 }
 
 type PayoutRequest struct {
-	DocURL   string `json:"doc_url"`
-	TenantID string `json:"tenant_id,omitempty"`
+	DocURL string `json:"doc_url"`
 }
 
 type BankStatementRequest struct {
-	DocURL   string `json:"doc_url"`
-	TenantID string `json:"tenant_id,omitempty"`
+	DocURL string `json:"doc_url"`
 }
 
 func main() {
@@ -196,6 +193,75 @@ func main() {
 	}
 }
 
+// getOrCreateTag returns the Paperless tag ID for the given name, creating the
+// tag if it does not already exist. Results are cached in srv.tagIDs.
+func (s *Server) getOrCreateTag(name string) (int, error) {
+	if id, ok := s.tagIDs[name]; ok {
+		return id, nil
+	}
+	tag, err := s.paperlessClient.CreateTag(name)
+	if err != nil {
+		return 0, err
+	}
+	s.tagIDs[name] = tag.ID
+	return tag.ID, nil
+}
+
+// applyErrorTags merges the given tag names into the document's existing tags
+// and PATCHes the document in Paperless.
+func (s *Server) applyErrorTags(docID int, existingTagIDs []int, tagNames ...string) {
+	tagSet := make(map[int]struct{}, len(existingTagIDs))
+	for _, id := range existingTagIDs {
+		tagSet[id] = struct{}{}
+	}
+	for _, name := range tagNames {
+		id, err := s.getOrCreateTag(name)
+		if err != nil {
+			slog.Warn("Failed to get/create error tag", "tag", name, "error", err)
+			continue
+		}
+		tagSet[id] = struct{}{}
+	}
+	merged := make([]int, 0, len(tagSet))
+	for id := range tagSet {
+		merged = append(merged, id)
+	}
+	if err := s.paperlessClient.UpdateDocument(docID, paperless.DocumentUpdate{Tags: merged}); err != nil {
+		slog.Warn("Failed to apply error tags to document", "document_id", docID, "error", err)
+	}
+}
+
+// resolveTenantID fetches the document from Paperless and returns the value of
+// the "tenant" custom field. If the field is absent or empty it applies error
+// tags to the document and returns an empty tenantID (no error is returned in
+// that case – the caller should treat empty tenantID as a non-fatal skip).
+func (s *Server) resolveTenantID(docID int) (tenantID string, doc *paperless.Document, err error) {
+	doc, err = s.paperlessClient.GetDocument(docID)
+	if err != nil {
+		return "", nil, fmt.Errorf("fetching document %d: %w", docID, err)
+	}
+
+	tenantFieldID, ok := s.customFields["tenant"]
+	if !ok {
+		slog.Warn("'tenant' custom field not found in Paperless, cannot determine tenant", "document_id", docID)
+		s.applyErrorTags(docID, doc.Tags, "status:error", "err:missing_tenant")
+		return "", doc, nil
+	}
+
+	for _, cf := range doc.CustomFields {
+		if cf.Field == tenantFieldID {
+			if v, ok := cf.Value.(string); ok && v != "" {
+				return v, doc, nil
+			}
+			break
+		}
+	}
+
+	slog.Warn("'tenant' custom field is missing or empty on document", "document_id", docID)
+	s.applyErrorTags(docID, doc.Tags, "status:error", "err:missing_tenant")
+	return "", doc, nil
+}
+
 func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	var req BillRequest
@@ -223,16 +289,26 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
-	if req.TenantID == "" {
-		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+	// Resolve tenant from the document's "tenant" custom field.
+	tenantID, _, err := s.resolveTenantID(docID)
+	if err != nil {
+		slog.Error("Failed to resolve tenant for bill document", "document_id", docID, "error", err)
+		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
+		return
+	}
+	if tenantID == "" {
+		// Error tags already applied; acknowledge the webhook without processing.
+		slog.Warn("Cannot process bill: tenant not set on document", "document_id", docID)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Cannot process: tenant not set"))
 		return
 	}
 
 	// Open a per-request tenant DB by rotating the service-account credentials
 	// for the given tenant via the nexus-control API.
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
 	if err != nil {
-		slog.Error("Failed to open tenant DB for bill request", "tenant_id", req.TenantID, "error", err)
+		slog.Error("Failed to open tenant DB for bill request", "tenant_id", tenantID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
 		return
 	}
@@ -624,14 +700,23 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	if req.TenantID == "" {
-		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+	// Resolve tenant from the document's "tenant" custom field.
+	tenantID, _, err := s.resolveTenantID(docID)
+	if err != nil {
+		slog.Error("Failed to resolve tenant for payout document", "document_id", docID, "error", err)
+		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
+		return
+	}
+	if tenantID == "" {
+		slog.Warn("Cannot process payout: tenant not set on document", "document_id", docID)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Cannot process: tenant not set"))
 		return
 	}
 
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
 	if err != nil {
-		slog.Error("Failed to open tenant DB for payout request", "tenant_id", req.TenantID, "error", err)
+		slog.Error("Failed to open tenant DB for payout request", "tenant_id", tenantID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
 		return
 	}
@@ -835,14 +920,23 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	if req.TenantID == "" {
-		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+	// Resolve tenant from the document's "tenant" custom field.
+	tenantID, _, err := s.resolveTenantID(docID)
+	if err != nil {
+		slog.Error("Failed to resolve tenant for bank statement document", "document_id", docID, "error", err)
+		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
+		return
+	}
+	if tenantID == "" {
+		slog.Warn("Cannot process bank statement: tenant not set on document", "document_id", docID)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Cannot process: tenant not set"))
 		return
 	}
 
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, req.TenantID)
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
 	if err != nil {
-		slog.Error("Failed to open tenant DB for bank statement request", "tenant_id", req.TenantID, "error", err)
+		slog.Error("Failed to open tenant DB for bank statement request", "tenant_id", tenantID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
 		return
 	}
