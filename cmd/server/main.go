@@ -73,8 +73,12 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	slog.SetDefault(logger)
 
-	// 3. Init DB (validates config; per-request connections are opened via OpenWithTenant)
+	// 3. Init DB — run schema migrations for all tenants at startup, then
+	// per-request connections are opened via OpenWithTenant.
 	storage.ValidateConfig(cfg.Nexus)
+	if err := storage.MigrateAllTenants(cfg.Nexus); err != nil {
+		slog.Warn("Startup migration failed for one or more tenants (will be retried on next startup)", "error", err)
+	}
 
 	// 3. Init Clients
 	pClient := paperless.NewClient(cfg.PaperlessURL, cfg.PaperlessUsername, cfg.PaperlessPassword)

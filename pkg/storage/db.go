@@ -112,35 +112,121 @@ func RotateTenantServiceAccount(controlURL, adminKey, tenantID string) (*service
 	return &sa, nil
 }
 
-// OpenWithTenant opens a single-connection DB scoped to the given tenant.
-// It first rotates the service account for the tenant via the nexus-control API
-// (using cfg.ControlURL and cfg.AdminAPIKey) to obtain fresh credentials, then
-// opens a pgx connection using those credentials. This matches the pattern in
-// satheeshds/portal db/db.go OpenWithCredentials + db/scheduler.go RotateTenantServiceAccount.
-// Callers are responsible for calling Close when the request is complete.
-func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
-	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
+// tenantEntry holds the minimal tenant data returned by the nexus-control
+// list-tenants API (mirrors the portal's internal tenant struct).
+type tenantEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// listAllTenants calls GET /api/v1/admin/tenants on the nexus-control API and
+// returns all registered tenants. This mirrors portal's listAllTenants in
+// db/scheduler.go.
+func listAllTenants(controlURL, adminKey string) ([]tenantEntry, error) {
+	endpoint := controlURL + "/api/v1/admin/tenants"
+	req, err := http.NewRequest(http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
+		return nil, fmt.Errorf("failed to build list-tenants request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Admin-API-Key", adminKey)
+
+	resp, err := nexusHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list-tenants request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("list tenants returned status %d (could not read body: %w)", resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("list tenants returned status %d: %s", resp.StatusCode, string(body))
 	}
 
+	var tenants []tenantEntry
+	if err := json.NewDecoder(resp.Body).Decode(&tenants); err != nil {
+		return nil, fmt.Errorf("failed to decode tenants response: %w", err)
+	}
+	return tenants, nil
+}
+
+// MigrateAllTenants lists every tenant from the nexus-control API, connects to
+// each tenant's database using freshly rotated service-account credentials, and
+// runs schema migrations. It mirrors portal's MigrateAllTenants in
+// db/scheduler.go. Errors for individual tenants are logged but do not abort
+// the loop so that a single bad tenant does not block the rest.
+func MigrateAllTenants(cfg config.NexusConfig) error {
+	tenants, err := listAllTenants(cfg.ControlURL, cfg.AdminAPIKey)
+	if err != nil {
+		return fmt.Errorf("MigrateAllTenants: failed to list tenants: %w", err)
+	}
+
+	slog.Info("running startup migrations for all tenants", "count", len(tenants))
+
+	for _, t := range tenants {
+		slog.Info("migrating tenant schema", "tenant_id", t.ID, "tenant_name", t.Name)
+
+		creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, t.ID)
+		if err != nil {
+			slog.Error("failed to rotate service account for migration", "tenant_id", t.ID, "error", err)
+			continue
+		}
+
+		db, err := openRawDB(cfg, creds)
+		if err != nil {
+			slog.Error("failed to open DB for migration", "tenant_id", t.ID, "error", err)
+			continue
+		}
+
+		if err := MigrateDB(db); err != nil {
+			slog.Error("migration failed", "tenant_id", t.ID, "error", err)
+		} else {
+			slog.Info("migration complete", "tenant_id", t.ID)
+		}
+		db.Close()
+	}
+
+	return nil
+}
+
+// openRawDB opens a *sql.DB using pre-obtained credentials (no rotation).
+// Used by both MigrateAllTenants and OpenWithTenant.
+func openRawDB(cfg config.NexusConfig, creds *serviceAccount) (*sql.DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		cfg.Host, cfg.Port, creds.Username, creds.Password, cfg.DBName,
 	)
 	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse tenant DSN: %w", err)
+		return nil, fmt.Errorf("failed to parse DSN: %w", err)
 	}
 	connConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 
 	db := stdlib.OpenDB(*connConfig)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	return db, nil
+}
 
-	if err := MigrateDB(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to migrate tenant schema for %s: %w", tenantID, err)
+// OpenWithTenant opens a single-connection DB scoped to the given tenant.
+// It first rotates the service account for the tenant via the nexus-control API
+// (using cfg.ControlURL and cfg.AdminAPIKey) to obtain fresh credentials, then
+// opens a pgx connection using those credentials. Schema migrations are applied
+// at startup via MigrateAllTenants, not here. This matches the pattern in
+// satheeshds/portal db/db.go OpenWithCredentials + db/scheduler.go
+// RotateTenantServiceAccount. Callers are responsible for calling Close when
+// the request is complete.
+func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
+	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
+	}
+
+	db, err := openRawDB(cfg, creds)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open DB for tenant %s: %w", tenantID, err)
 	}
 
 	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
