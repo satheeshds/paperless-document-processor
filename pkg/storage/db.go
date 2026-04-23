@@ -213,11 +213,10 @@ func openRawDB(cfg config.NexusConfig, creds *serviceAccount) (*sql.DB, error) {
 // OpenWithTenant opens a single-connection DB scoped to the given tenant.
 // It first rotates the service account for the tenant via the nexus-control API
 // (using cfg.ControlURL and cfg.AdminAPIKey) to obtain fresh credentials, then
-// opens a pgx connection using those credentials. Schema migrations are applied
-// at startup via MigrateAllTenants, not here. This matches the pattern in
-// satheeshds/portal db/db.go OpenWithCredentials + db/scheduler.go
-// RotateTenantServiceAccount. Callers are responsible for calling Close when
-// the request is complete.
+// opens a pgx connection using those credentials. MigrateDB is called after
+// opening so that tenants created after startup automatically get their schema
+// on the first request (idempotent — goose skips already-applied migrations).
+// Callers are responsible for calling Close when the request is complete.
 func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
 	if err != nil {
@@ -227,6 +226,11 @@ func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 	db, err := openRawDB(cfg, creds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open DB for tenant %s: %w", tenantID, err)
+	}
+
+	if err := MigrateDB(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate DB for tenant %s: %w", tenantID, err)
 	}
 
 	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
