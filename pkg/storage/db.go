@@ -240,6 +240,11 @@ func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 // GENERATED, but will auto-increment a plain INTEGER id column.  Because goose
 // uses CREATE TABLE IF NOT EXISTS, it will skip creation when the table already
 // exists, so this must be called first.
+//
+// Goose also inserts a zero-version baseline row as part of its own
+// createVersionTable; since we bypass that, we seed version_id=0 ourselves so
+// that goose.Provider.Up() can build its migration plan without failing with
+// "missing zero version migration".
 func createGooseVersionTable(db *sql.DB) error {
 	const createSQL = `CREATE TABLE IF NOT EXISTS goose_db_version (
 		id INTEGER,
@@ -250,6 +255,20 @@ func createGooseVersionTable(db *sql.DB) error {
 	if _, err := db.Exec(createSQL); err != nil {
 		return fmt.Errorf("failed to create goose_db_version table: %w", err)
 	}
+
+	// Seed the zero-version baseline row if it does not already exist.
+	// Goose normally inserts this row during its own table creation; since we
+	// created the table above, goose skips that step and we must seed it here.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(1) FROM goose_db_version WHERE version_id = 0").Scan(&count); err != nil {
+		return fmt.Errorf("failed to check goose zero version: %w", err)
+	}
+	if count == 0 {
+		if _, err := db.Exec("INSERT INTO goose_db_version (version_id, is_applied) VALUES (0, true)"); err != nil {
+			return fmt.Errorf("failed to seed goose zero version: %w", err)
+		}
+	}
+
 	return nil
 }
 
