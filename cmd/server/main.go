@@ -235,6 +235,45 @@ func (s *Server) applyErrorTags(docID int, existingTagIDs []int, tagNames ...str
 	}
 }
 
+// extractDocIDFromURL parses the numeric document ID from a Paperless document
+// URL of the form "http://host/documents/73/" and returns it.
+func extractDocIDFromURL(docURL string) (int, error) {
+	trimmed := strings.TrimSuffix(docURL, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("invalid doc_url format: %q", docURL)
+	}
+	id, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return 0, fmt.Errorf("invalid document ID in URL %q: %w", docURL, err)
+	}
+	return id, nil
+}
+
+// openTenantDB resolves the tenant for docID and opens a per-request Nexus DB
+// connection. If the tenant cannot be resolved or the DB cannot be opened the
+// method writes the appropriate HTTP response and returns (nil, false).
+func (s *Server) openTenantDB(w http.ResponseWriter, docID int) (*storage.DB, bool) {
+	tenantID, _, err := s.resolveTenantID(docID)
+	if err != nil {
+		slog.Error("Failed to resolve tenant", "document_id", docID, "error", err)
+		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
+		return nil, false
+	}
+	if tenantID == "" {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Cannot process: tenant not set"))
+		return nil, false
+	}
+	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
+	if err != nil {
+		slog.Error("Failed to open tenant DB", "tenant_id", tenantID, "document_id", docID, "error", err)
+		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+		return nil, false
+	}
+	return db, true
+}
+
 // resolveTenantID fetches the document from Paperless and returns the value of
 // the "tenant" custom field. If the field is absent or empty it applies error
 // tags to the document and returns an empty tenantID (no error is returned in
@@ -275,45 +314,17 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract ID from URL (e.g. http://webserver:8000/documents/73/)
-	trimmed := strings.TrimSuffix(req.DocURL, "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 {
-		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[len(parts)-1]
-
-	docID, err := strconv.Atoi(idStr)
+	docID, err := extractDocIDFromURL(req.DocURL)
 	if err != nil {
-		slog.Error("Invalid document ID format from url", "url", req.DocURL, "id_part", idStr, "error", err)
-		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		slog.Error("Invalid document URL in bill request", "url", req.DocURL, "error", err)
+		http.Error(w, "Invalid document URL", http.StatusBadRequest)
 		return
 	}
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
-	// Resolve tenant from the document's "tenant" custom field.
-	tenantID, _, err := s.resolveTenantID(docID)
-	if err != nil {
-		slog.Error("Failed to resolve tenant for bill document", "document_id", docID, "error", err)
-		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
-		return
-	}
-	if tenantID == "" {
-		// Error tags already applied; acknowledge the webhook without processing.
-		slog.Warn("Cannot process bill: tenant not set on document", "document_id", docID)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Cannot process: tenant not set"))
-		return
-	}
-
-	// Open a per-request tenant DB by rotating the service-account credentials
-	// for the given tenant via the nexus-control API.
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
-	if err != nil {
-		slog.Error("Failed to open tenant DB for bill request", "tenant_id", tenantID, "error", err)
-		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+	db, ok := s.openTenantDB(w, docID)
+	if !ok {
 		return
 	}
 
@@ -688,40 +699,17 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract ID from URL
-	trimmed := strings.TrimSuffix(req.DocURL, "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 {
-		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[len(parts)-1]
-	docID, err := strconv.Atoi(idStr)
+	docID, err := extractDocIDFromURL(req.DocURL)
 	if err != nil {
-		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		slog.Error("Invalid document URL in payout request", "url", req.DocURL, "error", err)
+		http.Error(w, "Invalid document URL", http.StatusBadRequest)
 		return
 	}
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	// Resolve tenant from the document's "tenant" custom field.
-	tenantID, _, err := s.resolveTenantID(docID)
-	if err != nil {
-		slog.Error("Failed to resolve tenant for payout document", "document_id", docID, "error", err)
-		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
-		return
-	}
-	if tenantID == "" {
-		slog.Warn("Cannot process payout: tenant not set on document", "document_id", docID)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Cannot process: tenant not set"))
-		return
-	}
-
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
-	if err != nil {
-		slog.Error("Failed to open tenant DB for payout request", "tenant_id", tenantID, "error", err)
-		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+	db, ok := s.openTenantDB(w, docID)
+	if !ok {
 		return
 	}
 
@@ -908,40 +896,17 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract ID from URL
-	trimmed := strings.TrimSuffix(req.DocURL, "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 {
-		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[len(parts)-1]
-	docID, err := strconv.Atoi(idStr)
+	docID, err := extractDocIDFromURL(req.DocURL)
 	if err != nil {
-		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		slog.Error("Invalid document URL in bank statement request", "url", req.DocURL, "error", err)
+		http.Error(w, "Invalid document URL", http.StatusBadRequest)
 		return
 	}
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	// Resolve tenant from the document's "tenant" custom field.
-	tenantID, _, err := s.resolveTenantID(docID)
-	if err != nil {
-		slog.Error("Failed to resolve tenant for bank statement document", "document_id", docID, "error", err)
-		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
-		return
-	}
-	if tenantID == "" {
-		slog.Warn("Cannot process bank statement: tenant not set on document", "document_id", docID)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Cannot process: tenant not set"))
-		return
-	}
-
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
-	if err != nil {
-		slog.Error("Failed to open tenant DB for bank statement request", "tenant_id", tenantID, "error", err)
-		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+	db, ok := s.openTenantDB(w, docID)
+	if !ok {
 		return
 	}
 
