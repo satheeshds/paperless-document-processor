@@ -54,7 +54,8 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	}))
 	defer server.Close()
 
-	s := &Server{accountingClient: accounting.NewClient(server.URL, "user", "pass")}
+	s := &Server{}
+	acClient := accounting.NewClient(server.URL, "user", "pass")
 	s.createLocalBill(123, &docai.ExtractedData{
 		ExampleDate: "2026-03-19",
 		TotalAmount: "100.50",
@@ -71,7 +72,7 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 				Amount:      "100.50",
 			},
 		},
-	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/123"})
+	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/123"}, acClient)
 
 	close(errCh)
 	for err := range errCh {
@@ -134,7 +135,8 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 	}))
 	defer server.Close()
 
-	s := &Server{accountingClient: accounting.NewClient(server.URL, "user", "pass")}
+	s := &Server{}
+	acClient2 := accounting.NewClient(server.URL, "user", "pass")
 	s.createLocalBill(124, &docai.ExtractedData{
 		ExampleDate: "2026-03-19",
 		TotalAmount: "0.295",
@@ -142,7 +144,7 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 		Entities: map[string]string{
 			"invoice_id": "INV-124",
 		},
-	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/124"})
+	}, &paperless.Document{OriginalFileName: "invoice.pdf"}, BillRequest{DocURL: "http://paperless/doc/124"}, acClient2)
 
 	close(errCh)
 	for err := range errCh {

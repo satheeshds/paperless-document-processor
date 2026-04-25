@@ -37,8 +37,6 @@ type Config struct {
 
 	// Accounting (optional)
 	AccountingURL  string
-	AccountingUser string
-	AccountingPass string
 
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
@@ -71,8 +69,6 @@ func Load() (*Config, error) {
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 
 		AccountingURL:  os.Getenv("ACCOUNTING_URL"),
-		AccountingUser: os.Getenv("ACCOUNTING_USER"),
-		AccountingPass: os.Getenv("ACCOUNTING_PASS"),
 
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),

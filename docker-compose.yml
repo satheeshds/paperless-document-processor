@@ -26,10 +26,8 @@ services:
       - DOCUMENT_AI_PROCESSOR_ID=${DOCUMENT_AI_PROCESSOR_ID}
       # If using key file:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/config/service-account.json
-      # Accounting (optional)
+      # Accounting (optional; credentials come from service account rotation)
       - ACCOUNTING_URL=${ACCOUNTING_URL}
-      - ACCOUNTING_USER=${ACCOUNTING_USER}
-      - ACCOUNTING_PASS=${ACCOUNTING_PASS}
     volumes:
       - /path/to/paperless/media:/app/media:ro
       # Mount the service account key

@@ -30,7 +30,6 @@ type Server struct {
 	cfg               *config.Config
 	paperlessClient   *paperless.Client
 	docAIClient       *docai.Client
-	accountingClient  *accounting.Client  // nil if not configured
 	tikaClient        *tika.Client        // nil if not configured
 	libreOfficeClient *libreoffice.Client // nil if not configured
 	customFields      map[string]int      // Name -> ID
@@ -94,9 +93,7 @@ func main() {
 	defer dClient.Close()
 
 	// Init Accounting client (optional)
-	var acClient *accounting.Client
 	if cfg.AccountingURL != "" {
-		acClient = accounting.NewClient(cfg.AccountingURL, cfg.AccountingUser, cfg.AccountingPass)
 		slog.Info("Accounting integration enabled", "url", cfg.AccountingURL)
 	} else {
 		slog.Info("Accounting integration disabled (ACCOUNTING_URL not set)")
@@ -115,7 +112,6 @@ func main() {
 		cfg:               cfg,
 		paperlessClient:   pClient,
 		docAIClient:       dClient,
-		accountingClient:  acClient,
 		tikaClient:        tika.NewClient(cfg.TikaURL),
 		libreOfficeClient: loClient,
 		customFields:      make(map[string]int),
@@ -263,28 +259,31 @@ func extractDocIDFromURL(docURL string) (int, error) {
 	return id, nil
 }
 
-// openTenantDB resolves the tenant for docID and opens a per-request Nexus DB
-// connection. If the tenant cannot be resolved or the DB cannot be opened the
-// method writes the appropriate HTTP response and returns (nil, false).
-func (s *Server) openTenantDB(w http.ResponseWriter, docID int) (*storage.DB, bool) {
+// openTenantResources resolves the tenant for docID, rotates service-account
+// credentials exactly once, opens a per-request Nexus DB connection, and (when
+// AccountingURL is configured) creates an accounting.Client using the same
+// rotated service_id / service_api_key as HTTP Basic Auth credentials.
+// If the tenant cannot be resolved or the DB cannot be opened the method writes
+// the appropriate HTTP response and returns (nil, nil, false).
+func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage.DB, *accounting.Client, bool) {
 	tenantID, _, err := s.resolveTenantID(docID)
 	if err != nil {
 		slog.Error("Failed to resolve tenant", "document_id", docID, "error", err)
 		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
-		return nil, false
+		return nil, nil, false
 	}
 	if tenantID == "" {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Cannot process: tenant not set"))
-		return nil, false
+		return nil, nil, false
 	}
-	db, err := storage.OpenWithTenant(s.cfg.Nexus, tenantID)
+	db, acClient, err := storage.OpenWithTenantAndAccounting(s.cfg.Nexus, tenantID, s.cfg.AccountingURL)
 	if err != nil {
-		slog.Error("Failed to open tenant DB", "tenant_id", tenantID, "document_id", docID, "error", err)
+		slog.Error("Failed to open tenant resources", "tenant_id", tenantID, "document_id", docID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
-		return nil, false
+		return nil, nil, false
 	}
-	return db, true
+	return db, acClient, true
 }
 
 // resolveTenantID fetches the document from Paperless and returns the value of
@@ -336,19 +335,19 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
-	db, ok := s.openTenantDB(w, docID)
+	db, acClient, ok := s.openTenantResources(w, docID)
 	if !ok {
 		return
 	}
 
 	// Run processing asynchronously
-	go s.processBill(docID, req, db)
+	go s.processBill(docID, req, db, acClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Processing started"))
 }
 
-func (s *Server) processBill(docID int, req BillRequest, db *storage.DB) {
+func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, acClient *accounting.Client) {
 	defer db.Close()
 	slog.Info("Starting processing", "document_id", docID)
 
@@ -405,8 +404,8 @@ func (s *Server) processBill(docID int, req BillRequest, db *storage.DB) {
 	}
 
 	// 4b. Create Bill in Accounting (optional)
-	if s.accountingClient != nil {
-		s.createLocalBill(docID, extracted, doc, req)
+	if acClient != nil {
+		s.createLocalBill(docID, extracted, doc, req, acClient)
 	}
 
 	// 5. Update Paperless
@@ -498,7 +497,7 @@ func (s *Server) getOrCreateCorrespondent(name string) (*paperless.Correspondent
 	return s.paperlessClient.CreateCorrespondent(name)
 }
 
-func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest) {
+func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, acClient *accounting.Client) {
 	slog.Info("Creating local accounting bill", "document_id", docID, "supplier", extracted.Supplier)
 
 	// Resolve vendor contact
@@ -507,7 +506,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		contactName = "Unknown Vendor"
 	}
 
-	contactID, err := s.accountingClient.GetOrCreateVendor(contactName)
+	contactID, err := acClient.GetOrCreateVendor(contactName)
 	if err != nil {
 		slog.Error("Accounting contact error", "document_id", docID, "error", err)
 		return
@@ -550,7 +549,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		Items:      buildBillLineItems(extracted.LineItems),
 	}
 
-	billID, err := s.accountingClient.CreateBill(billInput)
+	billID, err := acClient.CreateBill(billInput)
 	if err != nil {
 		slog.Error("Accounting bill creation failed", "document_id", docID, "error", err)
 		return
@@ -700,7 +699,7 @@ func roundRatHalfUpToInt(rat *big.Rat) *big.Int {
 }
 
 func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
-	if s.accountingClient == nil {
+	if s.cfg.AccountingURL == "" {
 		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
 		return
 	}
@@ -721,18 +720,18 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	db, ok := s.openTenantDB(w, docID)
+	db, acClient, ok := s.openTenantResources(w, docID)
 	if !ok {
 		return
 	}
 
-	go s.processPayout(docID, req, db)
+	go s.processPayout(docID, req, db, acClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Payout processing started"))
 }
 
-func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
+func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acClient *accounting.Client) {
 	defer db.Close()
 	slog.Info("Starting payout processing", "document_id", docID)
 
@@ -878,7 +877,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
 		slog.Debug("Extracted payout data from DB", "document_id", docID, "payout_input", payoutInput.String())
 
 		// 5. Send to Accounting
-		payoutID, err := s.accountingClient.CreatePayout(payoutInput)
+		payoutID, err := acClient.CreatePayout(payoutInput)
 		if err != nil {
 			slog.Error("Accounting payout creation failed", "document_id", docID, "error", err)
 			return
@@ -899,7 +898,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
 }
 
 func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
-	if s.accountingClient == nil {
+	if s.cfg.AccountingURL == "" {
 		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
 		return
 	}
@@ -920,18 +919,18 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	db, ok := s.openTenantDB(w, docID)
+	db, acClient, ok := s.openTenantResources(w, docID)
 	if !ok {
 		return
 	}
 
-	go s.processBankStatement(docID, req, db)
+	go s.processBankStatement(docID, req, db, acClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Bank statement processing started"))
 }
 
-func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB) {
+func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB, acClient *accounting.Client) {
 	defer db.Close()
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
@@ -982,7 +981,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 	slog.Info("Extracted transactions", "document_id", docID, "count", len(transactions))
 
 	// 5. Send to Accounting
-	if s.accountingClient != nil && len(transactions) > 0 {
+	if acClient != nil && len(transactions) > 0 {
 		// Resolve bank name from DocAI top-level entities (type = "bank_name")
 		bankName := "Bank"
 		for _, entity := range aiDoc.Entities {
@@ -999,7 +998,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 		}
 		slog.Info("Resolved bank name from DocAI", "bank_name", bankName)
 
-		bankAccountID, err := s.accountingClient.GetOrCreateBankAccount(bankName)
+		bankAccountID, err := acClient.GetOrCreateBankAccount(bankName)
 		if err != nil {
 			slog.Error("Failed to get/create bank account", "document_id", docID, "bank_name", bankName, "error", err)
 			// Continue without accounting — don't abort
@@ -1027,7 +1026,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 					Description:     &desc,
 				}
 
-				txID, err := s.accountingClient.CreateTransaction(txnInput)
+				txID, err := acClient.CreateTransaction(txnInput)
 				if err != nil {
 					slog.Error("Failed to create transaction", "document_id", docID, "error", err, "date", date, "amount", amount, "type", txType)
 					continue
