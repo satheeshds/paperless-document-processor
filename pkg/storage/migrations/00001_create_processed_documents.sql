@@ -1,6 +1,8 @@
+-- +goose NO TRANSACTION
+
 -- +goose Up
 CREATE TABLE IF NOT EXISTS processed_documents (
-    id INTEGER NOT NULL,
+    id INTEGER,
     paperless_id INTEGER NOT NULL,
     filename TEXT,
     supplier TEXT,

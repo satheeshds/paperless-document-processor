@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"paperless-document-processor/config"
@@ -34,6 +35,7 @@ type Server struct {
 	libreOfficeClient *libreoffice.Client // nil if not configured
 	customFields      map[string]int      // Name -> ID
 	tagIDs            map[string]int      // Name -> ID (e.g., "Swiggy" -> 3)
+	tagIDsMu          sync.RWMutex        // protects tagIDs for concurrent handler access
 	duckDBConfigs     map[int]config.PlatformConfig
 }
 
@@ -199,15 +201,26 @@ func main() {
 
 // getOrCreateTag returns the Paperless tag ID for the given name, creating the
 // tag if it does not already exist. Results are cached in srv.tagIDs.
+// It is safe to call concurrently from multiple goroutines.
 func (s *Server) getOrCreateTag(name string) (int, error) {
-	if id, ok := s.tagIDs[name]; ok {
+	// Fast path: read lock to check the cache.
+	s.tagIDsMu.RLock()
+	id, ok := s.tagIDs[name]
+	s.tagIDsMu.RUnlock()
+	if ok {
 		return id, nil
 	}
+
+	// Slow path: create the tag in Paperless, then update the cache.
 	tag, err := s.paperlessClient.CreateTag(name)
 	if err != nil {
 		return 0, err
 	}
+
+	s.tagIDsMu.Lock()
 	s.tagIDs[name] = tag.ID
+	s.tagIDsMu.Unlock()
+
 	return tag.ID, nil
 }
 
@@ -746,6 +759,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
 	// 3. Determine DuckDB Options based on Tags
 	var option config.PlatformConfig
 	var platform string
+	s.tagIDsMu.RLock()
 	for name, id := range s.tagIDs {
 		for _, tagID := range doc.Tags {
 			if id == tagID {
@@ -760,6 +774,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
 			break
 		}
 	}
+	s.tagIDsMu.RUnlock()
 
 	// Try to get file path from mounted media volume for DuckDB ProcessPlatformExcel
 	filename := "documents/originals/" + meta.MediaFilename
@@ -840,10 +855,10 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB) {
 				}
 			}
 		} else {
-			slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
+			slog.Info("Excel file detected in payout, storing via Nexus gateway", "path", filePath, "platform", platform, "options", option)
 
 			if err := db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
-				slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
+				slog.Error("Nexus gateway ProcessPlatformExcel failed", "document_id", docID, "error", err)
 				return
 			}
 		}
