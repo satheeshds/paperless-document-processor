@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"paperless-document-processor/pkg/accounting"
+	"paperless-document-processor/pkg/portal"
 	"paperless-document-processor/pkg/docai"
 	"paperless-document-processor/pkg/paperless"
 )
@@ -33,8 +33,8 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/contacts":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(accounting.Response[[]accounting.Contact]{
-				Data: []accounting.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
+			json.NewEncoder(w).Encode(portal.Response[[]portal.Contact]{
+				Data: []portal.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bills":
 			if err := json.NewDecoder(r.Body).Decode(&receivedBill); err != nil {
@@ -44,8 +44,8 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(accounting.Response[accounting.Bill]{
-				Data: accounting.Bill{ID: 30, Amount: receivedBill.Amount},
+			json.NewEncoder(w).Encode(portal.Response[portal.Bill]{
+				Data: portal.Bill{ID: 30, Amount: receivedBill.Amount},
 			})
 		default:
 			errCh <- &unexpectedRequestError{method: r.Method, path: r.URL.Path}
@@ -55,7 +55,7 @@ func TestCreateLocalBill_IncludesExtractedLineItems(t *testing.T) {
 	defer server.Close()
 
 	s := &Server{}
-	acClient := accounting.NewClient(server.URL, "user", "pass")
+	acClient := portal.NewClient(server.URL, "user", "pass")
 	s.createLocalBill(123, &docai.ExtractedData{
 		ExampleDate: "2026-03-19",
 		TotalAmount: "100.50",
@@ -114,8 +114,8 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/contacts":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(accounting.Response[[]accounting.Contact]{
-				Data: []accounting.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
+			json.NewEncoder(w).Encode(portal.Response[[]portal.Contact]{
+				Data: []portal.Contact{{ID: 10, Name: "Acme Corp", Type: "vendor"}},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bills":
 			if err := json.NewDecoder(r.Body).Decode(&receivedBill); err != nil {
@@ -125,8 +125,8 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(accounting.Response[accounting.Bill]{
-				Data: accounting.Bill{ID: 31, Amount: receivedBill.Amount},
+			json.NewEncoder(w).Encode(portal.Response[portal.Bill]{
+				Data: portal.Bill{ID: 31, Amount: receivedBill.Amount},
 			})
 		default:
 			errCh <- &unexpectedRequestError{method: r.Method, path: r.URL.Path}
@@ -136,7 +136,7 @@ func TestCreateLocalBill_RoundsTotalAmountToTwoDecimals(t *testing.T) {
 	defer server.Close()
 
 	s := &Server{}
-	acClient2 := accounting.NewClient(server.URL, "user", "pass")
+	acClient2 := portal.NewClient(server.URL, "user", "pass")
 	s.createLocalBill(124, &docai.ExtractedData{
 		ExampleDate: "2026-03-19",
 		TotalAmount: "0.295",

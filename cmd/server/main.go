@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"paperless-document-processor/config"
-	"paperless-document-processor/pkg/accounting"
+	"paperless-document-processor/pkg/portal"
 	"paperless-document-processor/pkg/docai"
 	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
@@ -261,11 +261,11 @@ func extractDocIDFromURL(docURL string) (int, error) {
 
 // openTenantResources resolves the tenant for docID, rotates service-account
 // credentials exactly once, opens a per-request Nexus DB connection, and (when
-// PortalURL is configured) creates an accounting.Client using the same
+// PortalURL is configured) creates an portal.Client using the same
 // rotated service_id / service_api_key as HTTP Basic Auth credentials.
 // If the tenant cannot be resolved or the DB cannot be opened the method writes
 // the appropriate HTTP response and returns (nil, nil, false).
-func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage.DB, *accounting.Client, bool) {
+func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage.DB, *portal.Client, bool) {
 	tenantID, _, err := s.resolveTenantID(docID)
 	if err != nil {
 		slog.Error("Failed to resolve tenant", "document_id", docID, "error", err)
@@ -347,7 +347,7 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Processing started"))
 }
 
-func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, acClient *accounting.Client) {
+func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, acClient *portal.Client) {
 	defer db.Close()
 	slog.Info("Starting processing", "document_id", docID)
 
@@ -403,7 +403,7 @@ func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, acClien
 		// Continue anyway? Yes.
 	}
 
-	// 4b. Create Bill in Accounting (optional)
+	// 4b. Create Bill in Portal (optional)
 	if acClient != nil {
 		s.createLocalBill(docID, extracted, doc, req, acClient)
 	}
@@ -497,8 +497,8 @@ func (s *Server) getOrCreateCorrespondent(name string) (*paperless.Correspondent
 	return s.paperlessClient.CreateCorrespondent(name)
 }
 
-func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, acClient *accounting.Client) {
-	slog.Info("Creating local accounting bill", "document_id", docID, "supplier", extracted.Supplier)
+func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, acClient *portal.Client) {
+	slog.Info("Creating local portal bill", "document_id", docID, "supplier", extracted.Supplier)
 
 	// Resolve vendor contact
 	contactName := extracted.Supplier
@@ -508,7 +508,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 
 	contactID, err := acClient.GetOrCreateVendor(contactName)
 	if err != nil {
-		slog.Error("Accounting contact error", "document_id", docID, "error", err)
+		slog.Error("Portal contact error", "document_id", docID, "error", err)
 		return
 	}
 
@@ -527,7 +527,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 	// Build amount (portal handles paise conversion)
 	amount := decimalToAmount(extracted.TotalAmount)
 	if amount <= 0 {
-		slog.Warn("Skipping accounting bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
+		slog.Warn("Skipping portal bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
 		return
 	}
 
@@ -537,7 +537,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		docNumber = val
 	}
 
-	billInput := accounting.BillInput{
+	billInput := portal.BillInput{
 		ContactID:  &contactID,
 		BillNumber: docNumber,
 		IssueDate:  issuedAt,
@@ -551,18 +551,18 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 
 	billID, err := acClient.CreateBill(billInput)
 	if err != nil {
-		slog.Error("Accounting bill creation failed", "document_id", docID, "error", err)
+		slog.Error("Portal bill creation failed", "document_id", docID, "error", err)
 		return
 	}
 
-	slog.Info("Local accounting bill created", "document_id", docID, "accounting_bill_id", billID)
+	slog.Info("Local portal bill created", "document_id", docID, "portal_bill_id", billID)
 }
 
-func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineItem {
-	lineItems := make([]accounting.BillLineItem, 0, len(extractedItems))
+func buildBillLineItems(extractedItems []docai.LineItem) []portal.BillLineItem {
+	lineItems := make([]portal.BillLineItem, 0, len(extractedItems))
 
 	for _, item := range extractedItems {
-		lineItem := accounting.BillLineItem{
+		lineItem := portal.BillLineItem{
 			Description: strings.TrimSpace(item.Description),
 			Quantity:    parseDecimal(item.Quantity),
 			Unit:        strings.TrimSpace(item.Unit),
@@ -731,7 +731,7 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Payout processing started"))
 }
 
-func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acClient *accounting.Client) {
+func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acClient *portal.Client) {
 	defer db.Close()
 	slog.Info("Starting payout processing", "document_id", docID)
 
@@ -868,7 +868,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acC
 			return
 		}
 
-		payoutInput.Platform = accounting.Platform(platform)
+		payoutInput.Platform = portal.Platform(platform)
 		payoutInput.OutletName = "Noodle House"
 
 		// swiggy sends the amount as negative, so adding it
@@ -876,10 +876,10 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acC
 
 		slog.Debug("Extracted payout data from DB", "document_id", docID, "payout_input", payoutInput.String())
 
-		// 5. Send to Accounting
+		// 5. Send to Portal
 		payoutID, err := acClient.CreatePayout(payoutInput)
 		if err != nil {
-			slog.Error("Accounting payout creation failed", "document_id", docID, "error", err)
+			slog.Error("Portal payout creation failed", "document_id", docID, "error", err)
 			return
 		}
 
@@ -890,7 +890,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acC
 		}
 		err = db.SaveDocument(&doc)
 
-		slog.Info("Local accounting payout created from Excel", "document_id", docID, "payout_id", payoutID)
+		slog.Info("Local portal payout created from Excel", "document_id", docID, "payout_id", payoutID)
 	} else {
 		// Payout with generic document (TIKA or DocAI)
 		// ... existing implementation if any ...
@@ -930,7 +930,7 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Bank statement processing started"))
 }
 
-func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB, acClient *accounting.Client) {
+func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB, acClient *portal.Client) {
 	defer db.Close()
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
@@ -980,7 +980,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 	transactions := s.docAIClient.ExtractBankStatementData(aiDoc)
 	slog.Info("Extracted transactions", "document_id", docID, "count", len(transactions))
 
-	// 5. Send to Accounting
+	// 5. Send to Portal
 	if acClient != nil && len(transactions) > 0 {
 		// Resolve bank name from DocAI top-level entities (type = "bank_name")
 		bankName := "Bank"
@@ -1001,12 +1001,12 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 		bankAccountID, err := acClient.GetOrCreateBankAccount(bankName)
 		if err != nil {
 			slog.Error("Failed to get/create bank account", "document_id", docID, "bank_name", bankName, "error", err)
-			// Continue without accounting — don't abort
+			// Continue without portal — don't abort
 		} else {
 			for _, txMap := range transactions {
 				amount, _ := strconv.ParseFloat(txMap["amount"], 64)
 
-				// Map debit → expense, credit → income (accounting service expects income/expense)
+				// Map debit → expense, credit → income (portal service expects income/expense)
 				txType := "expense"
 				if txMap["type"] == "credit" {
 					txType = "income"
@@ -1018,7 +1018,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 				}
 				desc := txMap["description"]
 
-				txnInput := accounting.TransactionInput{
+				txnInput := portal.TransactionInput{
 					AccountID:       bankAccountID,
 					Type:            txType,
 					Amount:          amount,

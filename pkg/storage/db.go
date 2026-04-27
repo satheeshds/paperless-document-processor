@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"paperless-document-processor/config"
-	"paperless-document-processor/pkg/accounting"
+	"paperless-document-processor/pkg/portal"
 	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
 
@@ -227,13 +227,13 @@ func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 
 // OpenWithTenantAndPortal rotates the service account for the given tenant
 // exactly once, opens a per-request DB connection with those credentials, and
-// (when portalURL is non-empty) also constructs an accounting.Client using
+// (when portalURL is non-empty) also constructs an portal.Client using
 // the same rotated service_id / service_api_key as HTTP Basic Auth credentials.
 // This means the portal REST API and the Nexus gateway both use the same
 // per-tenant service account, and credentials are only ever live for the
 // duration of a single request.
 // Callers are responsible for calling db.Close() when the request is complete.
-func OpenWithTenantAndPortal(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *accounting.Client, error) {
+func OpenWithTenantAndPortal(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *portal.Client, error) {
 	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
@@ -249,9 +249,9 @@ func OpenWithTenantAndPortal(cfg config.NexusConfig, tenantID, portalURL string)
 		return nil, nil, fmt.Errorf("failed to migrate DB for tenant %s: %w", tenantID, err)
 	}
 
-	var acClient *accounting.Client
+	var acClient *portal.Client
 	if portalURL != "" {
-		acClient = accounting.NewClient(portalURL, creds.Username, creds.Password)
+		acClient = portal.NewClient(portalURL, creds.Username, creds.Password)
 	}
 
 	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
@@ -495,8 +495,8 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 // GetPlatformExcelRows retrieves the previously stored Excel rows from the platform table.
 // The struct expression is wrapped in to_json()::VARCHAR so that the result is
 // returned as a standard JSON string through the Nexus gateway.
-func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (accounting.PayoutInput, error) {
-	var payoutInput accounting.PayoutInput
+func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (portal.PayoutInput, error) {
+	var payoutInput portal.PayoutInput
 	for _, exportConfig := range options.ExportConfigs {
 		if exportConfig.ReaderConfigs == nil || len(exportConfig.ReaderConfigs) == 0 {
 			continue
@@ -506,7 +506,7 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 		slog.Debug("Executing query to get platform table", "query", query, "docID", docID)
 		row := d.Conn.QueryRow(query, docID)
 		if row.Err() != nil {
-			return accounting.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", row.Err())
+			return portal.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", row.Err())
 		}
 		var jsonStr string
 		if err := row.Scan(&jsonStr); err != nil {
@@ -514,12 +514,12 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 				slog.Warn("GetPlatformExcelRows: no rows found", "table", tableName, "docID", docID)
 				continue
 			}
-			return accounting.PayoutInput{}, fmt.Errorf("failed to scan platform table row: %w", err)
+			return portal.PayoutInput{}, fmt.Errorf("failed to scan platform table row: %w", err)
 		}
 		slog.Debug("Retrieved platform table JSON", "table", tableName, "json", jsonStr)
 		var rowData map[string]interface{}
 		if err := json.Unmarshal([]byte(jsonStr), &rowData); err != nil {
-			return accounting.PayoutInput{}, fmt.Errorf("failed to parse JSON from platform table: %w", err)
+			return portal.PayoutInput{}, fmt.Errorf("failed to parse JSON from platform table: %w", err)
 		}
 		dc := &mapstructure.DecoderConfig{
 			Result:           &payoutInput,
@@ -528,7 +528,7 @@ func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.Pla
 		}
 		decoder, err := mapstructure.NewDecoder(dc)
 		if err != nil {
-			return accounting.PayoutInput{}, fmt.Errorf("failed to create mapstructure decoder: %w", err)
+			return portal.PayoutInput{}, fmt.Errorf("failed to create mapstructure decoder: %w", err)
 		}
 		if err := decoder.Decode(rowData); err != nil {
 			slog.Warn("GetPlatformExcelRows: partial decode error (some fields may be zero)", "table", tableName, "err", err)
