@@ -11,10 +11,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"paperless-document-processor/config"
-	"paperless-document-processor/pkg/accounting"
+	"paperless-document-processor/pkg/portal"
 	"paperless-document-processor/pkg/docai"
 	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
@@ -27,14 +28,13 @@ import (
 
 type Server struct {
 	cfg               *config.Config
-	db                *storage.DB
 	paperlessClient   *paperless.Client
 	docAIClient       *docai.Client
-	accountingClient  *accounting.Client  // nil if not configured
 	tikaClient        *tika.Client        // nil if not configured
 	libreOfficeClient *libreoffice.Client // nil if not configured
 	customFields      map[string]int      // Name -> ID
 	tagIDs            map[string]int      // Name -> ID (e.g., "Swiggy" -> 3)
+	tagIDsMu          sync.RWMutex        // protects tagIDs for concurrent handler access
 	duckDBConfigs     map[int]config.PlatformConfig
 }
 
@@ -74,13 +74,12 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	slog.SetDefault(logger)
 
-	// 3. Init DB
-	db, err := storage.InitDB(cfg.DBPath)
-	if err != nil {
-		slog.Error("Failed to init db", "error", err)
-		os.Exit(1)
+	// 3. Init DB — run schema migrations for all tenants at startup, then
+	// per-request connections are opened via OpenWithTenant.
+	storage.ValidateConfig(cfg.Nexus)
+	if err := storage.MigrateAllTenants(cfg.Nexus); err != nil {
+		slog.Warn("Startup migration failed for one or more tenants (will be retried on next startup)", "error", err)
 	}
-	defer db.Close()
 
 	// 3. Init Clients
 	pClient := paperless.NewClient(cfg.PaperlessURL, cfg.PaperlessUsername, cfg.PaperlessPassword)
@@ -93,13 +92,11 @@ func main() {
 	}
 	defer dClient.Close()
 
-	// Init Accounting client (optional)
-	var acClient *accounting.Client
-	if cfg.AccountingURL != "" {
-		acClient = accounting.NewClient(cfg.AccountingURL, cfg.AccountingUser, cfg.AccountingPass)
-		slog.Info("Accounting integration enabled", "url", cfg.AccountingURL)
+	// Init Portal client (optional)
+	if cfg.PortalURL != "" {
+		slog.Info("Portal integration enabled", "url", cfg.PortalURL)
 	} else {
-		slog.Info("Accounting integration disabled (ACCOUNTING_URL not set)")
+		slog.Info("Portal integration disabled (PORTAL_URL not set)")
 	}
 
 	// Init LibreOffice parser client (optional)
@@ -113,10 +110,8 @@ func main() {
 
 	srv := &Server{
 		cfg:               cfg,
-		db:                db,
 		paperlessClient:   pClient,
 		docAIClient:       dClient,
-		accountingClient:  acClient,
 		tikaClient:        tika.NewClient(cfg.TikaURL),
 		libreOfficeClient: loClient,
 		customFields:      make(map[string]int),
@@ -200,6 +195,128 @@ func main() {
 	}
 }
 
+// getOrCreateTag returns the Paperless tag ID for the given name, creating the
+// tag if it does not already exist. Results are cached in srv.tagIDs.
+// It is safe to call concurrently from multiple goroutines.
+func (s *Server) getOrCreateTag(name string) (int, error) {
+	// Fast path: read lock to check the cache.
+	s.tagIDsMu.RLock()
+	id, ok := s.tagIDs[name]
+	s.tagIDsMu.RUnlock()
+	if ok {
+		return id, nil
+	}
+
+	// Slow path: create the tag in Paperless, then update the cache.
+	tag, err := s.paperlessClient.CreateTag(name)
+	if err != nil {
+		return 0, err
+	}
+
+	s.tagIDsMu.Lock()
+	s.tagIDs[name] = tag.ID
+	s.tagIDsMu.Unlock()
+
+	return tag.ID, nil
+}
+
+// applyErrorTags merges the given tag names into the document's existing tags
+// and PATCHes the document in Paperless.
+func (s *Server) applyErrorTags(docID int, existingTagIDs []int, tagNames ...string) {
+	tagSet := make(map[int]struct{}, len(existingTagIDs))
+	for _, id := range existingTagIDs {
+		tagSet[id] = struct{}{}
+	}
+	for _, name := range tagNames {
+		id, err := s.getOrCreateTag(name)
+		if err != nil {
+			slog.Warn("Failed to get/create error tag", "tag", name, "error", err)
+			continue
+		}
+		tagSet[id] = struct{}{}
+	}
+	merged := make([]int, 0, len(tagSet))
+	for id := range tagSet {
+		merged = append(merged, id)
+	}
+	if err := s.paperlessClient.UpdateDocument(docID, paperless.DocumentUpdate{Tags: merged}); err != nil {
+		slog.Warn("Failed to apply error tags to document", "document_id", docID, "error", err)
+	}
+}
+
+// extractDocIDFromURL parses the numeric document ID from a Paperless document
+// URL of the form "http://host/documents/73/" and returns it.
+func extractDocIDFromURL(docURL string) (int, error) {
+	trimmed := strings.TrimSuffix(docURL, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("invalid doc_url format: %q", docURL)
+	}
+	id, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return 0, fmt.Errorf("invalid document ID in URL %q: %w", docURL, err)
+	}
+	return id, nil
+}
+
+// openTenantResources resolves the tenant for docID, rotates service-account
+// credentials exactly once, opens a per-request Nexus DB connection, and (when
+// PortalURL is configured) creates an portal.Client using the same
+// rotated service_id / service_api_key as HTTP Basic Auth credentials.
+// If the tenant cannot be resolved or the DB cannot be opened the method writes
+// the appropriate HTTP response and returns (nil, nil, false).
+func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage.DB, *portal.Client, bool) {
+	tenantID, _, err := s.resolveTenantID(docID)
+	if err != nil {
+		slog.Error("Failed to resolve tenant", "document_id", docID, "error", err)
+		http.Error(w, "Failed to fetch document from Paperless", http.StatusInternalServerError)
+		return nil, nil, false
+	}
+	if tenantID == "" {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Cannot process: tenant not set"))
+		return nil, nil, false
+	}
+	db, pClient, err := storage.GetTenantResources(s.cfg.Nexus, tenantID, s.cfg.PortalURL)
+	if err != nil {
+		slog.Error("Failed to open tenant resources", "tenant_id", tenantID, "document_id", docID, "error", err)
+		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
+		return nil, nil, false
+	}
+	return db, pClient, true
+}
+
+// resolveTenantID fetches the document from Paperless and returns the value of
+// the "tenant" custom field. If the field is absent or empty it applies error
+// tags to the document and returns an empty tenantID (no error is returned in
+// that case – the caller should treat empty tenantID as a non-fatal skip).
+func (s *Server) resolveTenantID(docID int) (tenantID string, doc *paperless.Document, err error) {
+	doc, err = s.paperlessClient.GetDocument(docID)
+	if err != nil {
+		return "", nil, fmt.Errorf("fetching document %d: %w", docID, err)
+	}
+
+	tenantFieldID, ok := s.customFields["tenant"]
+	if !ok {
+		slog.Warn("'tenant' custom field not found in Paperless, cannot determine tenant", "document_id", docID)
+		s.applyErrorTags(docID, doc.Tags, "status:error", "err:missing_tenant")
+		return "", doc, nil
+	}
+
+	for _, cf := range doc.CustomFields {
+		if cf.Field == tenantFieldID {
+			if v, ok := cf.Value.(string); ok && v != "" {
+				return v, doc, nil
+			}
+			break
+		}
+	}
+
+	slog.Warn("'tenant' custom field is missing or empty on document", "document_id", docID)
+	s.applyErrorTags(docID, doc.Tags, "status:error", "err:missing_tenant")
+	return "", doc, nil
+}
+
 func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	var req BillRequest
@@ -209,32 +326,29 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract ID from URL (e.g. http://webserver:8000/documents/73/)
-	trimmed := strings.TrimSuffix(req.DocURL, "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 {
-		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[len(parts)-1]
-
-	docID, err := strconv.Atoi(idStr)
+	docID, err := extractDocIDFromURL(req.DocURL)
 	if err != nil {
-		slog.Error("Invalid document ID format from url", "url", req.DocURL, "id_part", idStr, "error", err)
-		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		slog.Error("Invalid document URL in bill request", "url", req.DocURL, "error", err)
+		http.Error(w, "Invalid document URL", http.StatusBadRequest)
 		return
 	}
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
+	db, pClient, ok := s.openTenantResources(w, docID)
+	if !ok {
+		return
+	}
+
 	// Run processing asynchronously
-	go s.processBill(docID, req)
+	go s.processBill(docID, req, db, pClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Processing started"))
 }
 
-func (s *Server) processBill(docID int, req BillRequest) {
+func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, pClient *portal.Client) {
+	defer db.Close()
 	slog.Info("Starting processing", "document_id", docID)
 
 	// 1. Get Metadata
@@ -284,14 +398,14 @@ func (s *Server) processBill(docID int, req BillRequest) {
 		ExtractedText: extracted.Text,
 	}
 
-	if err := s.db.SaveDocument(dbDoc); err != nil {
+	if err := db.SaveDocument(dbDoc); err != nil {
 		slog.Error("DB Save error", "document_id", docID, "error", err)
 		// Continue anyway? Yes.
 	}
 
-	// 4b. Create Bill in Accounting (optional)
-	if s.accountingClient != nil {
-		s.createLocalBill(docID, extracted, doc, req)
+	// 4b. Create Bill in Portal (optional)
+	if pClient != nil {
+		s.createLocalBill(docID, extracted, doc, req, pClient)
 	}
 
 	// 5. Update Paperless
@@ -383,8 +497,8 @@ func (s *Server) getOrCreateCorrespondent(name string) (*paperless.Correspondent
 	return s.paperlessClient.CreateCorrespondent(name)
 }
 
-func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest) {
-	slog.Info("Creating local accounting bill", "document_id", docID, "supplier", extracted.Supplier)
+func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, pClient *portal.Client) {
+	slog.Info("Creating local portal bill", "document_id", docID, "supplier", extracted.Supplier)
 
 	// Resolve vendor contact
 	contactName := extracted.Supplier
@@ -392,9 +506,9 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		contactName = "Unknown Vendor"
 	}
 
-	contactID, err := s.accountingClient.GetOrCreateVendor(contactName)
+	contactID, err := pClient.GetOrCreateVendor(contactName)
 	if err != nil {
-		slog.Error("Accounting contact error", "document_id", docID, "error", err)
+		slog.Error("Portal contact error", "document_id", docID, "error", err)
 		return
 	}
 
@@ -413,7 +527,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 	// Build amount (portal handles paise conversion)
 	amount := decimalToAmount(extracted.TotalAmount)
 	if amount <= 0 {
-		slog.Warn("Skipping accounting bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
+		slog.Warn("Skipping portal bill: no valid amount", "document_id", docID, "raw_amount", extracted.TotalAmount)
 		return
 	}
 
@@ -423,7 +537,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		docNumber = val
 	}
 
-	billInput := accounting.BillInput{
+	billInput := portal.BillInput{
 		ContactID:  &contactID,
 		BillNumber: docNumber,
 		IssueDate:  issuedAt,
@@ -435,20 +549,20 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		Items:      buildBillLineItems(extracted.LineItems),
 	}
 
-	billID, err := s.accountingClient.CreateBill(billInput)
+	billID, err := pClient.CreateBill(billInput)
 	if err != nil {
-		slog.Error("Accounting bill creation failed", "document_id", docID, "error", err)
+		slog.Error("Portal bill creation failed", "document_id", docID, "error", err)
 		return
 	}
 
-	slog.Info("Local accounting bill created", "document_id", docID, "accounting_bill_id", billID)
+	slog.Info("Local portal bill created", "document_id", docID, "portal_bill_id", billID)
 }
 
-func buildBillLineItems(extractedItems []docai.LineItem) []accounting.BillLineItem {
-	lineItems := make([]accounting.BillLineItem, 0, len(extractedItems))
+func buildBillLineItems(extractedItems []docai.LineItem) []portal.BillLineItem {
+	lineItems := make([]portal.BillLineItem, 0, len(extractedItems))
 
 	for _, item := range extractedItems {
-		lineItem := accounting.BillLineItem{
+		lineItem := portal.BillLineItem{
 			Description: strings.TrimSpace(item.Description),
 			Quantity:    parseDecimal(item.Quantity),
 			Unit:        strings.TrimSpace(item.Unit),
@@ -585,8 +699,8 @@ func roundRatHalfUpToInt(rat *big.Rat) *big.Int {
 }
 
 func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
-	if s.accountingClient == nil {
-		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
+	if s.cfg.PortalURL == "" {
+		http.Error(w, "Portal integration disabled", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -597,33 +711,32 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract ID from URL
-	trimmed := strings.TrimSuffix(req.DocURL, "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 {
-		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[len(parts)-1]
-	docID, err := strconv.Atoi(idStr)
+	docID, err := extractDocIDFromURL(req.DocURL)
 	if err != nil {
-		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		slog.Error("Invalid document URL in payout request", "url", req.DocURL, "error", err)
+		http.Error(w, "Invalid document URL", http.StatusBadRequest)
 		return
 	}
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	go s.processPayout(docID, req)
+	db, pClient, ok := s.openTenantResources(w, docID)
+	if !ok {
+		return
+	}
+
+	go s.processPayout(docID, req, db, pClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Payout processing started"))
 }
 
-func (s *Server) processPayout(docID int, req PayoutRequest) {
+func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, pClient *portal.Client) {
+	defer db.Close()
 	slog.Info("Starting payout processing", "document_id", docID)
 
 	// 1. if the document already processed, return no need to process again
-	if processed, err := s.db.IsDocumentProcessed(docID); err == nil && processed {
+	if processed, err := db.IsDocumentProcessed(docID); err == nil && processed {
 		slog.Warn("Document already processed, skipping it", "document_id", docID)
 		return
 	}
@@ -645,6 +758,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 	// 3. Determine DuckDB Options based on Tags
 	var option config.PlatformConfig
 	var platform string
+	s.tagIDsMu.RLock()
 	for name, id := range s.tagIDs {
 		for _, tagID := range doc.Tags {
 			if id == tagID {
@@ -659,6 +773,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 			break
 		}
 	}
+	s.tagIDsMu.RUnlock()
 
 	// Try to get file path from mounted media volume for DuckDB ProcessPlatformExcel
 	filename := "documents/originals/" + meta.MediaFilename
@@ -733,27 +848,27 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 				resultRowCounts[i] = len(result.Rows)
 
 				tableName := importConfig.GetTableName(platform)
-				if err := s.db.LoadRowsIntoTable(docID, tableName, result); err != nil {
+				if err := db.LoadRowsIntoTable(docID, tableName, result); err != nil {
 					slog.Error("Failed to load LibreOffice rows into table", "document_id", docID, "table", tableName, "error", err)
 					return
 				}
 			}
 		} else {
-			slog.Info("Excel file detected in payout, storing via DuckDB", "path", filePath, "platform", platform, "options", option)
+			slog.Info("Excel file detected in payout, storing via Nexus gateway", "path", filePath, "platform", platform, "options", option)
 
-			if err := s.db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
-				slog.Error("DuckDB ProcessPlatformExcel failed", "document_id", docID, "error", err)
+			if err := db.ProcessPlatformExcel(docID, filePath, platform, option); err != nil {
+				slog.Error("Nexus gateway ProcessPlatformExcel failed", "document_id", docID, "error", err)
 				return
 			}
 		}
 
-		payoutInput, err := s.db.GetPlatformExcelRows(docID, platform, option)
+		payoutInput, err := db.GetPlatformExcelRows(docID, platform, option)
 		if err != nil {
 			slog.Error("Failed to get excel rows", "document_id", docID, "error", err)
 			return
 		}
 
-		payoutInput.Platform = accounting.Platform(platform)
+		payoutInput.Platform = portal.Platform(platform)
 		payoutInput.OutletName = "Noodle House"
 
 		// swiggy sends the amount as negative, so adding it
@@ -761,10 +876,10 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 
 		slog.Debug("Extracted payout data from DB", "document_id", docID, "payout_input", payoutInput.String())
 
-		// 5. Send to Accounting
-		payoutID, err := s.accountingClient.CreatePayout(payoutInput)
+		// 5. Send to Portal
+		payoutID, err := pClient.CreatePayout(payoutInput)
 		if err != nil {
-			slog.Error("Accounting payout creation failed", "document_id", docID, "error", err)
+			slog.Error("Portal payout creation failed", "document_id", docID, "error", err)
 			return
 		}
 
@@ -773,9 +888,9 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 			PaperlessID: docID,
 			Filename:    filename,
 		}
-		err = s.db.SaveDocument(&doc)
+		err = db.SaveDocument(&doc)
 
-		slog.Info("Local accounting payout created from Excel", "document_id", docID, "payout_id", payoutID)
+		slog.Info("Local portal payout created from Excel", "document_id", docID, "payout_id", payoutID)
 	} else {
 		// Payout with generic document (TIKA or DocAI)
 		// ... existing implementation if any ...
@@ -783,8 +898,8 @@ func (s *Server) processPayout(docID int, req PayoutRequest) {
 }
 
 func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
-	if s.accountingClient == nil {
-		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
+	if s.cfg.PortalURL == "" {
+		http.Error(w, "Portal integration disabled", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -795,29 +910,28 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract ID from URL
-	trimmed := strings.TrimSuffix(req.DocURL, "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 {
-		http.Error(w, "Invalid doc_url format", http.StatusBadRequest)
-		return
-	}
-	idStr := parts[len(parts)-1]
-	docID, err := strconv.Atoi(idStr)
+	docID, err := extractDocIDFromURL(req.DocURL)
 	if err != nil {
-		http.Error(w, "Invalid document ID in URL", http.StatusBadRequest)
+		slog.Error("Invalid document URL in bank statement request", "url", req.DocURL, "error", err)
+		http.Error(w, "Invalid document URL", http.StatusBadRequest)
 		return
 	}
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	go s.processBankStatement(docID, req)
+	db, pClient, ok := s.openTenantResources(w, docID)
+	if !ok {
+		return
+	}
+
+	go s.processBankStatement(docID, req, db, pClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Bank statement processing started"))
 }
 
-func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
+func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB, pClient *portal.Client) {
+	defer db.Close()
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
 	// 1. Get Metadata & Content
@@ -856,7 +970,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 		ExtractedText: aiDoc.Text,
 	}
 
-	err = s.db.SaveDocument(doc)
+	err = db.SaveDocument(doc)
 	if err != nil {
 		slog.Error("Failed to save document", "document_id", docID, "error", err)
 		return
@@ -866,8 +980,8 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 	transactions := s.docAIClient.ExtractBankStatementData(aiDoc)
 	slog.Info("Extracted transactions", "document_id", docID, "count", len(transactions))
 
-	// 5. Send to Accounting
-	if s.accountingClient != nil && len(transactions) > 0 {
+	// 5. Send to Portal
+	if pClient != nil && len(transactions) > 0 {
 		// Resolve bank name from DocAI top-level entities (type = "bank_name")
 		bankName := "Bank"
 		for _, entity := range aiDoc.Entities {
@@ -884,15 +998,15 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 		}
 		slog.Info("Resolved bank name from DocAI", "bank_name", bankName)
 
-		bankAccountID, err := s.accountingClient.GetOrCreateBankAccount(bankName)
+		bankAccountID, err := pClient.GetOrCreateBankAccount(bankName)
 		if err != nil {
 			slog.Error("Failed to get/create bank account", "document_id", docID, "bank_name", bankName, "error", err)
-			// Continue without accounting — don't abort
+			// Continue without portal — don't abort
 		} else {
 			for _, txMap := range transactions {
 				amount, _ := strconv.ParseFloat(txMap["amount"], 64)
 
-				// Map debit → expense, credit → income (accounting service expects income/expense)
+				// Map debit → expense, credit → income (portal service expects income/expense)
 				txType := "expense"
 				if txMap["type"] == "credit" {
 					txType = "income"
@@ -904,7 +1018,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 				}
 				desc := txMap["description"]
 
-				txnInput := accounting.TransactionInput{
+				txnInput := portal.TransactionInput{
 					AccountID:       bankAccountID,
 					Type:            txType,
 					Amount:          amount,
@@ -912,7 +1026,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest) {
 					Description:     &desc,
 				}
 
-				txID, err := s.accountingClient.CreateTransaction(txnInput)
+				txID, err := pClient.CreateTransaction(txnInput)
 				if err != nil {
 					slog.Error("Failed to create transaction", "document_id", docID, "error", err, "date", date, "amount", amount, "type", txType)
 					continue

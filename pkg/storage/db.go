@@ -2,25 +2,38 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
-	"math/big"
+	"net/http"
+	"net/url"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
 	"paperless-document-processor/config"
-	"paperless-document-processor/pkg/accounting"
+	"paperless-document-processor/pkg/portal"
 	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
 
-	"github.com/duckdb/duckdb-go/v2"
-	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
+
+//go:embed migrations/*.sql
+var embedMigrations embed.FS
+
+func init() {
+	// Silence goose's default logger; we use slog.
+	goose.SetLogger(goose.NopLogger())
+}
 
 type DB struct {
 	Conn *sql.DB
@@ -37,89 +50,333 @@ type ProcessedDocument struct {
 	CreatedAt     time.Time
 }
 
-func InitDB(filepath string) (*DB, error) {
-	slog.Info("Initializing database", "path", filepath)
-	db, err := sql.Open("duckdb", filepath)
-	if err != nil {
-		slog.Error("Failed to open database", "path", filepath, "error", err)
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	if err := db.Ping(); err != nil {
-		slog.Error("Failed to ping database", "path", filepath, "error", err)
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	// Install and load excel extension
-	_, err = db.Exec("INSTALL excel; LOAD excel;")
-	if err != nil {
-		slog.Warn("Failed to install/load excel extension", "error", err)
-	}
-
-	if err := createTables(db); err != nil {
-		slog.Error("Failed to create tables", "error", err)
-		return nil, fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	slog.Info("Database initialized successfully")
-	return &DB{Conn: db}, nil
+// ValidateConfig logs the Nexus gateway configuration. All DB connections are
+// opened per-request via OpenWithTenant (which rotates service-account
+// credentials via the nexus-control API), so no static startup connection is
+// required.
+func ValidateConfig(cfg config.NexusConfig) {
+	slog.Info("Nexus gateway configured", "host", cfg.Host, "port", cfg.Port, "control_url", cfg.ControlURL)
 }
 
-func createTables(db *sql.DB) error {
-	// 1. Try to create the sequence (Native DuckDB path)
-	_, err := db.Exec("CREATE SEQUENCE IF NOT EXISTS seq_processed_documents_id;")
+// serviceAccount holds the rotated credentials returned by the nexus-control API.
+type serviceAccount struct {
+	Username string `json:"service_id"`
+	Password string `json:"service_api_key"`
+}
 
-	var query string
-	if err == nil {
-		// Success! This is a native DuckDB database.
-		slog.Debug("Creating tables using native DuckDB sequence")
-		query = `
-		CREATE TABLE IF NOT EXISTS processed_documents (
-			id INTEGER PRIMARY KEY DEFAULT nextval('seq_processed_documents_id'),
-			paperless_id INTEGER NOT NULL,
-			filename TEXT,
-			supplier TEXT,
-			date TEXT,
-			total_amount REAL,
-			raw_ocr_data TEXT,
-			extracted_text TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`
-	} else if strings.Contains(err.Error(), "SQLite") || strings.Contains(strings.ToLower(err.Error()), "sqlite") {
-		// This is a SQLite file being opened by DuckDB.
-		slog.Warn("Database identified as SQLite, using SQLite-compatible schema")
-		query = `
-		CREATE TABLE IF NOT EXISTS processed_documents (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			paperless_id INTEGER NOT NULL,
-			filename TEXT,
-			supplier TEXT,
-			date TEXT,
-			total_amount REAL,
-			raw_ocr_data TEXT,
-			extracted_text TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`
-	} else {
-		// Some other error
-		return fmt.Errorf("failed to initialize sequence: %w", err)
+// nexusHTTPClient is a shared HTTP client for nexus-control admin API calls.
+var nexusHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// RotateTenantServiceAccount calls the nexus-control admin API to rotate the
+// service account for the given tenant, returning fresh credentials.
+// This matches the pattern in satheeshds/portal db/scheduler.go.
+func RotateTenantServiceAccount(controlURL, adminKey, tenantID string) (*serviceAccount, error) {
+	if controlURL == "" {
+		return nil, fmt.Errorf("NEXUS_CONTROL_URL is not configured")
+	}
+	if adminKey == "" {
+		return nil, fmt.Errorf("ADMIN_API_KEY is not configured")
 	}
 
-	_, err = db.Exec(query)
+	endpoint := fmt.Sprintf("%s/api/v1/admin/tenants/%s/service-account/rotate", controlURL, url.PathEscape(tenantID))
+	req, err := http.NewRequest(http.MethodPost, endpoint, http.NoBody)
 	if err != nil {
+		return nil, fmt.Errorf("failed to build rotate request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-API-Key", adminKey)
+
+	resp, err := nexusHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rotate service account request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("rotate service account returned status %d (could not read body: %w)", resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("rotate service account returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sa serviceAccount
+	if err := json.NewDecoder(resp.Body).Decode(&sa); err != nil {
+		return nil, fmt.Errorf("failed to decode service account response: %w", err)
+	}
+	if sa.Username == "" || sa.Password == "" {
+		return nil, fmt.Errorf("rotate service account response missing credentials for tenant %s", tenantID)
+	}
+
+	slog.Debug("rotated service account", "tenant_id", tenantID)
+	return &sa, nil
+}
+
+// tenantEntry holds the minimal tenant data returned by the nexus-control
+// list-tenants API (mirrors the portal's internal tenant struct).
+type tenantEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// listAllTenants calls GET /api/v1/admin/tenants on the nexus-control API and
+// returns all registered tenants. This mirrors portal's listAllTenants in
+// db/scheduler.go.
+func listAllTenants(controlURL, adminKey string) ([]tenantEntry, error) {
+	endpoint := controlURL + "/api/v1/admin/tenants"
+	req, err := http.NewRequest(http.MethodGet, endpoint, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build list-tenants request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Admin-API-Key", adminKey)
+
+	resp, err := nexusHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list-tenants request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("list tenants returned status %d (could not read body: %w)", resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("list tenants returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tenants []tenantEntry
+	if err := json.NewDecoder(resp.Body).Decode(&tenants); err != nil {
+		return nil, fmt.Errorf("failed to decode tenants response: %w", err)
+	}
+	return tenants, nil
+}
+
+// MigrateAllTenants lists every tenant from the nexus-control API, connects to
+// each tenant's database using freshly rotated service-account credentials, and
+// runs schema migrations. It mirrors portal's MigrateAllTenants in
+// db/scheduler.go. Errors for individual tenants are logged but do not abort
+// the loop so that a single bad tenant does not block the rest.
+func MigrateAllTenants(cfg config.NexusConfig) error {
+	tenants, err := listAllTenants(cfg.ControlURL, cfg.AdminAPIKey)
+	if err != nil {
+		return fmt.Errorf("MigrateAllTenants: failed to list tenants: %w", err)
+	}
+
+	slog.Info("running startup migrations for all tenants", "count", len(tenants))
+
+	for _, t := range tenants {
+		slog.Info("migrating tenant schema", "tenant_id", t.ID, "tenant_name", t.Name)
+
+		creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, t.ID)
+		if err != nil {
+			slog.Error("failed to rotate service account for migration", "tenant_id", t.ID, "error", err)
+			continue
+		}
+
+		db, err := openRawDB(cfg, creds)
+		if err != nil {
+			slog.Error("failed to open DB for migration", "tenant_id", t.ID, "error", err)
+			continue
+		}
+
+		if err := MigrateDB(db); err != nil {
+			slog.Error("migration failed", "tenant_id", t.ID, "error", err)
+		} else {
+			slog.Info("migration complete", "tenant_id", t.ID)
+		}
+		db.Close()
+	}
+
+	return nil
+}
+
+// openRawDB opens a *sql.DB using pre-obtained credentials (no rotation).
+// Used by both MigrateAllTenants and OpenWithTenant.
+func openRawDB(cfg config.NexusConfig, creds *serviceAccount) (*sql.DB, error) {
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		cfg.Host, cfg.Port, creds.Username, creds.Password, cfg.DBName,
+	)
+	connConfig, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DSN: %w", err)
+	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+
+	db := stdlib.OpenDB(*connConfig)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
+// OpenWithTenant opens a single-connection DB scoped to the given tenant.
+// It first rotates the service account for the tenant via the nexus-control API
+// (using cfg.ControlURL and cfg.AdminAPIKey) to obtain fresh credentials, then
+// opens a pgx connection using those credentials. MigrateDB is called after
+// opening so that tenants created after startup automatically get their schema
+// on the first request (idempotent — goose skips already-applied migrations).
+// OpenWithTenant opens a per-request DB connection for the given tenant.
+// It rotates the service account credentials and runs MigrateDB.
+// Callers are responsible for calling Close when the request is complete.
+func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
+	db, _, err := GetTenantResources(cfg, tenantID, "")
+	return db, err
+}
+
+// GetTenantResources rotates the service account for the given tenant
+// exactly once, opens a per-request DB connection with those credentials, and
+// (when portalURL is non-empty) also constructs a portal.Client using
+// the same rotated service_id / service_api_key as HTTP Basic Auth credentials.
+// This means the portal REST API and the Nexus gateway both use the same
+// per-tenant service account, and credentials are only ever live for the
+// duration of a single request.
+// Callers are responsible for calling db.Close() when the request is complete.
+func GetTenantResources(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *portal.Client, error) {
+	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
+	}
+
+	rawDB, err := openRawDB(cfg, creds)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open DB for tenant %s: %w", tenantID, err)
+	}
+
+	if err := MigrateDB(rawDB); err != nil {
+		rawDB.Close()
+		return nil, nil, fmt.Errorf("failed to migrate DB for tenant %s: %w", tenantID, err)
+	}
+
+	var acClient *portal.Client
+	if portalURL != "" {
+		acClient = portal.NewClient(portalURL, creds.Username, creds.Password)
+	}
+
+	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
+	return &DB{Conn: rawDB}, acClient, nil
+}
+
+// createGooseVersionTable pre-creates the goose_db_version tracking table with
+// DuckLake-compatible DDL before goose.NewProvider runs.  Goose normally
+// creates this table itself using "id integer PRIMARY KEY GENERATED BY DEFAULT
+// AS IDENTITY" (PostgreSQL-specific); DuckLake does not support PRIMARY KEY or
+// GENERATED, but will auto-increment a plain INTEGER id column.  Because goose
+// uses CREATE TABLE IF NOT EXISTS, it will skip creation when the table already
+// exists, so this must be called first.
+//
+// Goose also inserts a zero-version baseline row as part of its own
+// createVersionTable; since we bypass that, we seed version_id=0 ourselves so
+// that goose.Provider.Up() can build its migration plan without failing with
+// "missing zero version migration".
+func createGooseVersionTable(db *sql.DB) error {
+	const createSQL = `CREATE TABLE IF NOT EXISTS goose_db_version (
+		id INTEGER,
+		version_id BIGINT NOT NULL,
+		is_applied BOOLEAN NOT NULL,
+		tstamp TIMESTAMP
+	);`
+	if _, err := db.Exec(createSQL); err != nil {
+		return fmt.Errorf("failed to create goose_db_version table: %w", err)
+	}
+
+	// Seed the zero-version baseline row if it does not already exist.
+	// Goose normally inserts this row during its own table creation; since we
+	// created the table above, goose skips that step and we must seed it here.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(1) FROM goose_db_version WHERE version_id = 0").Scan(&count); err != nil {
+		return fmt.Errorf("failed to check goose zero version: %w", err)
+	}
+	if count == 0 {
+		if _, err := db.Exec("INSERT INTO goose_db_version (version_id, is_applied) VALUES (0, true)"); err != nil {
+			return fmt.Errorf("failed to seed goose zero version: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ensureProcessedDocumentsTable creates the processed_documents table if it
+// does not already exist.  This is the canonical DDL applied to every tenant
+// database; it is always run after the goose migration pass as a safety net so
+// that tables are created even when goose cannot apply migrations (e.g. when
+// the Nexus gateway does not support DDL inside transactions).
+func ensureProcessedDocumentsTable(db *sql.DB) error {
+	const createSQL = `CREATE TABLE IF NOT EXISTS processed_documents (
+		id INTEGER,
+		paperless_id INTEGER NOT NULL,
+		filename TEXT,
+		supplier TEXT,
+		date TEXT,
+		total_amount REAL,
+		raw_ocr_data TEXT,
+		extracted_text TEXT,
+		created_at TIMESTAMP
+	);`
+	if _, err := db.Exec(createSQL); err != nil {
 		return fmt.Errorf("failed to create processed_documents table: %w", err)
 	}
+	return nil
+}
 
-	// Create index
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_paperless_id ON processed_documents(paperless_id);`)
-	return err
+// MigrateDB applies all pending up-migrations to the provided database using
+// embedded SQL files (pkg/storage/migrations/*.sql).  It is idempotent: goose
+// records applied versions in a goose_db_version table and skips them on
+// subsequent calls.
+//
+// After the goose pass, ensureProcessedDocumentsTable is always called as a
+// safety net.  This covers two scenarios:
+//  1. A brand-new tenant where goose has never run.
+//  2. A tenant where goose's internal versioning (which uses PostgreSQL-specific
+//     pg_tables / advisory-lock queries) does not work reliably against the
+//     Nexus/DuckLake gateway — in that case goose logs a warning but the direct
+//     DDL still creates the required tables.
+func MigrateDB(db *sql.DB) error {
+	// Pre-create the goose version table with DuckLake-compatible DDL.
+	// Goose's DialectPostgres uses GENERATED BY DEFAULT AS IDENTITY which
+	// DuckLake does not support.  We create the table first; goose then skips
+	// its own CREATE TABLE IF NOT EXISTS.
+	if err := createGooseVersionTable(db); err != nil {
+		return fmt.Errorf("failed to initialize goose version table: %w", err)
+	}
+
+	migFS, err := fs.Sub(embedMigrations, "migrations")
+	if err != nil {
+		return fmt.Errorf("failed to create migration filesystem: %w", err)
+	}
+
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migFS)
+	if err != nil {
+		slog.Warn("goose provider creation failed, continuing with direct DDL", "error", err)
+	} else {
+		results, err := provider.Up(context.Background())
+		if err != nil {
+			slog.Warn("goose migration failed, continuing with direct DDL fallback", "error", err)
+		} else {
+			for _, r := range results {
+				slog.Info("applied migration", "version", r.Source.Version, "duration", r.Duration)
+			}
+			if len(results) > 0 {
+				slog.Info("database migrations complete", "applied", len(results))
+			}
+		}
+	}
+
+	// Always run the direct DDL safety net — CREATE TABLE IF NOT EXISTS is
+	// idempotent so this is a no-op when the table already exists.
+	if err := ensureProcessedDocumentsTable(db); err != nil {
+		return fmt.Errorf("database migration failed: %w", err)
+	}
+
+	return nil
 }
 
 func (d *DB) SaveDocument(doc *ProcessedDocument) error {
 	slog.Debug("Saving processed document to DB", "paperless_id", doc.PaperlessID, "filename", doc.Filename)
 	query := `
 	INSERT INTO processed_documents (paperless_id, filename, supplier, date, total_amount, raw_ocr_data, extracted_text)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 	_, err := d.Conn.Exec(query, doc.PaperlessID, doc.Filename, doc.Supplier, doc.Date, doc.TotalAmount, doc.RawOCRData, doc.ExtractedText)
 	if err != nil {
@@ -130,7 +387,7 @@ func (d *DB) SaveDocument(doc *ProcessedDocument) error {
 }
 
 func (d *DB) IsDocumentProcessed(docID int) (bool, error) {
-	query := `SELECT COUNT(1) FROM processed_documents WHERE paperless_id = ?;`
+	query := `SELECT COUNT(1) FROM processed_documents WHERE paperless_id = $1;`
 	slog.Debug("Executing check statement", "query", query, "docID", docID)
 	var count int
 	if err := d.Conn.QueryRow(query, docID).Scan(&count); err != nil {
@@ -143,9 +400,10 @@ func (d *DB) Close() error {
 	return d.Conn.Close()
 }
 
-// ProcessPlatformExcel reads an Excel file using DuckDB and stores it into a platform-specific table.
+// ProcessPlatformExcel reads an Excel file via the Nexus gateway (DuckDB) and
+// stores it into a platform-specific table.
 func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, options config.PlatformConfig) error {
-	slog.Info("Storing Excel file via DuckDB into platform table", "platform", platform, "path", filePath)
+	slog.Info("Storing Excel file via Nexus gateway into platform table", "platform", platform, "path", filePath)
 
 	for _, importConfig := range options.ImportConfigs {
 
@@ -165,7 +423,7 @@ func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, o
 
 		optionStr := importConfig.ToOptionString()
 
-		tableName := importConfig.GetTableName(platform)
+		tableName := pgx.Identifier{importConfig.GetTableName(platform)}.Sanitize()
 
 		// 1. Create table if not exists
 		createStmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s AS SELECT %d as document_id, * FROM read_xlsx('%s', %s) LIMIT 0;`, tableName, docID, filePath, optionStr)
@@ -174,7 +432,7 @@ func (d *DB) ProcessPlatformExcel(docID int, filePath string, platform string, o
 			return fmt.Errorf("failed to create platform table: %w", err)
 		}
 
-		// 3. Insert data (using BY NAME safely gracefully handles varying schema if supported, and normally duckdb ignores missing columns)
+		// 2. Insert data (BY NAME handles varying schema gracefully; DuckDB ignores missing columns)
 		insertStmt := fmt.Sprintf(`INSERT INTO %s BY NAME SELECT %d as document_id, * FROM read_xlsx('%s', %s);`, tableName, docID, filePath, optionStr)
 		slog.Debug("Executing insert statement", "query", insertStmt)
 		if _, err := d.Conn.Exec(insertStmt); err != nil {
@@ -203,7 +461,7 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 
 	if rangeStart != "" {
 		var rowCount int
-		query := fmt.Sprintf("SELECT COUNT(1) FROM %s WHERE document_id = ?", option.GetTableName(platform))
+		query := fmt.Sprintf("SELECT COUNT(1) FROM %s WHERE document_id = $1", pgx.Identifier{option.GetTableName(platform)}.Sanitize())
 		slog.Debug("Executing query to get range end", "query", query, "docID", docID)
 		rows := d.Conn.QueryRow(query, docID)
 		if rows.Err() != nil {
@@ -234,72 +492,45 @@ func (d *DB) GetRangeEnd(docID int, platform string, option config.ImportConfig)
 	return excel.Range{}, nil
 }
 
-// bigNumericDecodeHook converts *big.Int and *big.Float returned by the DuckDB
-// driver into the plain Go numeric type expected by the mapstructure target field.
-func bigNumericDecodeHook(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
-	switch v := data.(type) {
-	case *big.Int:
-		if v == nil {
-			return data, nil
-		}
-		switch to.Kind() { //nolint:exhaustive
-		case reflect.Float32, reflect.Float64:
-			f, _ := new(big.Float).SetInt(v).Float64()
-			return f, nil
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return v.Int64(), nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			return v.Uint64(), nil
-		}
-	case *big.Float:
-		if v == nil {
-			return data, nil
-		}
-		switch to.Kind() { //nolint:exhaustive
-		case reflect.Float32, reflect.Float64:
-			f, _ := v.Float64()
-			return f, nil
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			i, _ := v.Int64()
-			return i, nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			u, _ := v.Uint64()
-			return u, nil
-		}
-	}
-	return data, nil
-}
-
 // GetPlatformExcelRows retrieves the previously stored Excel rows from the platform table.
-func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (accounting.PayoutInput, error) {
-	var payoutInput accounting.PayoutInput
+// The struct expression is wrapped in to_json()::VARCHAR so that the result is
+// returned as a standard JSON string through the Nexus gateway.
+func (d *DB) GetPlatformExcelRows(docID int, platform string, options config.PlatformConfig) (portal.PayoutInput, error) {
+	var payoutInput portal.PayoutInput
 	for _, exportConfig := range options.ExportConfigs {
 		if exportConfig.ReaderConfigs == nil || len(exportConfig.ReaderConfigs) == 0 {
 			continue
 		}
-		var jsonMap duckdb.Composite[map[string]interface{}]
-		tableName := exportConfig.GetTableName(platform)
-		query := fmt.Sprintf("SELECT %s FROM %s WHERE document_id = ?", exportConfig.ToSelectExpresssions(), tableName)
+		tableName := pgx.Identifier{exportConfig.GetTableName(platform)}.Sanitize()
+		query := fmt.Sprintf("SELECT to_json(%s)::VARCHAR FROM %s WHERE document_id = $1", exportConfig.ToSelectExpresssions(), tableName)
 		slog.Debug("Executing query to get platform table", "query", query, "docID", docID)
-		rows := d.Conn.QueryRow(query, docID)
-		if rows.Err() != nil {
-			return accounting.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", rows.Err())
+		row := d.Conn.QueryRow(query, docID)
+		if row.Err() != nil {
+			return portal.PayoutInput{}, fmt.Errorf("failed to query platform table: %w", row.Err())
 		}
-		rows.Scan(&jsonMap)
-		slog.Debug("Retrieved platform table", "rows", jsonMap.Get())
+		var jsonStr string
+		if err := row.Scan(&jsonStr); err != nil {
+			if err == sql.ErrNoRows {
+				slog.Warn("GetPlatformExcelRows: no rows found", "table", tableName, "docID", docID)
+				continue
+			}
+			return portal.PayoutInput{}, fmt.Errorf("failed to scan platform table row: %w", err)
+		}
+		slog.Debug("Retrieved platform table JSON", "table", tableName, "json", jsonStr)
+		var rowData map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &rowData); err != nil {
+			return portal.PayoutInput{}, fmt.Errorf("failed to parse JSON from platform table: %w", err)
+		}
 		dc := &mapstructure.DecoderConfig{
 			Result:           &payoutInput,
 			WeaklyTypedInput: true,
-			DecodeHook: mapstructure.ComposeDecodeHookFunc(
-				bigNumericDecodeHook,
-				mapstructure.StringToBasicTypeHookFunc(),
-			),
+			DecodeHook:       mapstructure.StringToBasicTypeHookFunc(),
 		}
 		decoder, err := mapstructure.NewDecoder(dc)
 		if err != nil {
-			return accounting.PayoutInput{}, fmt.Errorf("failed to create mapstructure decoder: %w", err)
+			return portal.PayoutInput{}, fmt.Errorf("failed to create mapstructure decoder: %w", err)
 		}
-		if err := decoder.Decode(jsonMap.Get()); err != nil {
+		if err := decoder.Decode(rowData); err != nil {
 			slog.Warn("GetPlatformExcelRows: partial decode error (some fields may be zero)", "table", tableName, "err", err)
 		}
 	}
@@ -347,7 +578,7 @@ func marshalOrderedRows(rows []map[string]interface{}, headers []string) ([]byte
 // LoadRowsIntoTable creates (if necessary) a platform-specific DuckDB table from
 // rows returned by the LibreOffice parser service and bulk-inserts the rows
 // using DuckDB's read_json_auto table function — the same approach used for
-// read_xlsx in the DuckDB path.
+// read_xlsx in the Nexus gateway path.
 //
 // All column types are inferred by DuckDB from the JSON data.  Export-config
 // expressions should use TRY_CAST for numeric conversions where needed.
@@ -358,7 +589,7 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	}
 
 	// Serialize rows to a temporary JSON file so DuckDB can read them via
-	// read_json_auto — identical approach to how the DuckDB path uses read_xlsx.
+	// read_json_auto — identical approach to how the Nexus path uses read_xlsx.
 	// Use marshalOrderedRows when headers are available so that read_json_auto
 	// creates DuckDB table columns in the original xlsx column sequence.
 	var jsonBytes []byte
@@ -392,12 +623,13 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	// Escape single quotes in the path for safe SQL embedding (os.CreateTemp
 	// produces safe names, but belt-and-suspenders for portability).
 	safePath := strings.ReplaceAll(tmpPath, "'", "''")
+	safeTableName := pgx.Identifier{tableName}.Sanitize()
 
 	// 1. Create table schema (LIMIT 0 = structure only, no rows) using
 	//    read_json_auto — mirrors the read_xlsx CREATE TABLE pattern.
 	createStmt := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s AS SELECT %d AS document_id, * FROM read_json_auto('%s') LIMIT 0;`,
-		tableName, docID, safePath,
+		safeTableName, docID, safePath,
 	)
 	slog.Debug("LoadRowsIntoTable: create table", "query", createStmt)
 	if _, err := d.Conn.Exec(createStmt); err != nil {
@@ -408,7 +640,7 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	//    to table columns by name so additional/missing columns don't cause errors.
 	insertStmt := fmt.Sprintf(
 		`INSERT INTO %s BY NAME SELECT %d AS document_id, * FROM read_json_auto('%s');`,
-		tableName, docID, safePath,
+		safeTableName, docID, safePath,
 	)
 	slog.Debug("LoadRowsIntoTable: insert", "query", insertStmt)
 	if _, err := d.Conn.Exec(insertStmt); err != nil {
@@ -416,7 +648,7 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 		slog.Warn("LoadRowsIntoTable: BY NAME insert failed, retrying without BY NAME", "err", err)
 		fallbackStmt := fmt.Sprintf(
 			`INSERT INTO %s SELECT %d AS document_id, * FROM read_json_auto('%s');`,
-			tableName, docID, safePath,
+			safeTableName, docID, safePath,
 		)
 		if _, err2 := d.Conn.Exec(fallbackStmt); err2 != nil {
 			return fmt.Errorf("LoadRowsIntoTable: failed to insert JSON data: %w (fallback: %v)", err, err2)

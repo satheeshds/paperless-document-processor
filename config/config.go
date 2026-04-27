@@ -8,9 +8,22 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// NexusConfig holds the connection parameters for the Nexus gateway.
+type NexusConfig struct {
+	Host   string // NEXUS_HOST (default: localhost)
+	Port   string // NEXUS_PORT (default: 5433)
+	DBName string // NEXUS_DB (default: lake)
+
+	// ControlURL and AdminAPIKey are used to rotate per-tenant service-account
+	// credentials via the nexus-control API before opening connections.
+	// See OpenWithTenant in pkg/storage/db.go.
+	ControlURL  string // NEXUS_CONTROL_URL – base URL of nexus-control (e.g. http://nexus-control:8080)
+	AdminAPIKey string // ADMIN_API_KEY – admin key sent as X-Admin-API-Key
+}
+
 type Config struct {
 	Port                     string
-	DBPath                   string
+	Nexus                    NexusConfig
 	PaperlessURL             string
 	PaperlessUsername        string
 	PaperlessPassword        string
@@ -22,15 +35,13 @@ type Config struct {
 	PayoutConfigPath         string // JSON file for platform options
 	BankStatementProcessorID string
 
-	// Accounting (optional)
-	AccountingURL  string
-	AccountingUser string
-	AccountingPass string
+	// Portal (optional)
+	PortalURL string
 
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
 
-	// LibreOffice parser service (optional, used for payout XLSX when DuckDB fails)
+	// LibreOffice parser service (optional, used for payout XLSX when Nexus cannot read the file)
 	LibreOfficeURL      string
 	LibreOfficeDataPath string
 }
@@ -40,8 +51,14 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Port:                  getEnv("PORT", "80"),
-		DBPath:                getEnv("DB_PATH", "data/duck.db"),
+		Port: getEnv("PORT", "80"),
+		Nexus: NexusConfig{
+			Host:        getEnv("NEXUS_HOST", "localhost"),
+			Port:        getEnv("NEXUS_PORT", "5433"),
+			DBName:      getEnv("NEXUS_DB", "lake"),
+			ControlURL:  strings.TrimRight(os.Getenv("NEXUS_CONTROL_URL"), "/"),
+			AdminAPIKey: os.Getenv("ADMIN_API_KEY"),
+		},
 		PaperlessURL:          os.Getenv("PAPERLESS_URL"),
 		PaperlessUsername:     os.Getenv("PAPERLESS_USERNAME"),
 		PaperlessPassword:     os.Getenv("PAPERLESS_PASSWORD"),
@@ -51,9 +68,7 @@ func Load() (*Config, error) {
 		GoogleCredentialsPath: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 
-		AccountingURL:  os.Getenv("ACCOUNTING_URL"),
-		AccountingUser: os.Getenv("ACCOUNTING_USER"),
-		AccountingPass: os.Getenv("ACCOUNTING_PASS"),
+		PortalURL: os.Getenv("PORTAL_URL"),
 
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),
@@ -95,6 +110,12 @@ func (c *Config) validate() error {
 	}
 	if c.BankStatementProcessorID == "" {
 		return fmt.Errorf("BANK_STATEMENT_PROCESSOR_ID is required")
+	}
+	if c.Nexus.ControlURL == "" {
+		return fmt.Errorf("NEXUS_CONTROL_URL is required")
+	}
+	if c.Nexus.AdminAPIKey == "" {
+		return fmt.Errorf("ADMIN_API_KEY is required")
 	}
 	return nil
 }
@@ -193,7 +214,7 @@ func (p ImportConfig) GetTableName(platform string) string {
 }
 
 // UseLibreOffice reports whether this platform should be processed by the
-// LibreOffice parser service rather than DuckDB.
+// LibreOffice parser service rather than the Nexus gateway.
 func (p PlatformConfig) UseLibreOffice() bool {
 	return strings.EqualFold(p.Method, "libreoffice")
 }
