@@ -92,11 +92,11 @@ func main() {
 	}
 	defer dClient.Close()
 
-	// Init Accounting client (optional)
-	if cfg.AccountingURL != "" {
-		slog.Info("Accounting integration enabled", "url", cfg.AccountingURL)
+	// Init Portal client (optional)
+	if cfg.PortalURL != "" {
+		slog.Info("Portal integration enabled", "url", cfg.PortalURL)
 	} else {
-		slog.Info("Accounting integration disabled (ACCOUNTING_URL not set)")
+		slog.Info("Portal integration disabled (PORTAL_URL not set)")
 	}
 
 	// Init LibreOffice parser client (optional)
@@ -261,7 +261,7 @@ func extractDocIDFromURL(docURL string) (int, error) {
 
 // openTenantResources resolves the tenant for docID, rotates service-account
 // credentials exactly once, opens a per-request Nexus DB connection, and (when
-// AccountingURL is configured) creates an accounting.Client using the same
+// PortalURL is configured) creates an accounting.Client using the same
 // rotated service_id / service_api_key as HTTP Basic Auth credentials.
 // If the tenant cannot be resolved or the DB cannot be opened the method writes
 // the appropriate HTTP response and returns (nil, nil, false).
@@ -277,7 +277,7 @@ func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage
 		w.Write([]byte("Cannot process: tenant not set"))
 		return nil, nil, false
 	}
-	db, acClient, err := storage.OpenWithTenantAndAccounting(s.cfg.Nexus, tenantID, s.cfg.AccountingURL)
+	db, acClient, err := storage.OpenWithTenantAndPortal(s.cfg.Nexus, tenantID, s.cfg.PortalURL)
 	if err != nil {
 		slog.Error("Failed to open tenant resources", "tenant_id", tenantID, "document_id", docID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
@@ -699,8 +699,8 @@ func roundRatHalfUpToInt(rat *big.Rat) *big.Int {
 }
 
 func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.AccountingURL == "" {
-		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
+	if s.cfg.PortalURL == "" {
+		http.Error(w, "Portal integration disabled", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -898,8 +898,8 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acC
 }
 
 func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.AccountingURL == "" {
-		http.Error(w, "Accounting integration disabled", http.StatusServiceUnavailable)
+	if s.cfg.PortalURL == "" {
+		http.Error(w, "Portal integration disabled", http.StatusServiceUnavailable)
 		return
 	}
 

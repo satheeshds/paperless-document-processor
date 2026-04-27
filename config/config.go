@@ -35,8 +35,8 @@ type Config struct {
 	PayoutConfigPath         string // JSON file for platform options
 	BankStatementProcessorID string
 
-	// Accounting (optional)
-	AccountingURL  string
+	// Portal (optional)
+	PortalURL string
 
 	// Tika (optional, used for payout XLSX)
 	TikaURL string
@@ -68,7 +68,7 @@ func Load() (*Config, error) {
 		GoogleCredentialsPath: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 
-		AccountingURL:  os.Getenv("ACCOUNTING_URL"),
+		PortalURL: os.Getenv("PORTAL_URL"),
 
 		TikaURL:          getEnv("TIKA_URL", "http://localhost:9998"),
 		PayoutConfigPath: os.Getenv("PAYOUT_EXCEL_DUCKDB_CONFIG_PATH"),

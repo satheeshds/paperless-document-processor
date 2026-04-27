@@ -217,21 +217,23 @@ func openRawDB(cfg config.NexusConfig, creds *serviceAccount) (*sql.DB, error) {
 // opens a pgx connection using those credentials. MigrateDB is called after
 // opening so that tenants created after startup automatically get their schema
 // on the first request (idempotent — goose skips already-applied migrations).
+// OpenWithTenant opens a per-request DB connection for the given tenant.
+// It rotates the service account credentials and runs MigrateDB.
 // Callers are responsible for calling Close when the request is complete.
 func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
-	db, _, err := OpenWithTenantAndAccounting(cfg, tenantID, "")
+	db, _, err := OpenWithTenantAndPortal(cfg, tenantID, "")
 	return db, err
 }
 
-// OpenWithTenantAndAccounting rotates the service account for the given tenant
+// OpenWithTenantAndPortal rotates the service account for the given tenant
 // exactly once, opens a per-request DB connection with those credentials, and
-// (when accountingURL is non-empty) also constructs an accounting.Client using
+// (when portalURL is non-empty) also constructs an accounting.Client using
 // the same rotated service_id / service_api_key as HTTP Basic Auth credentials.
 // This means the portal REST API and the Nexus gateway both use the same
 // per-tenant service account, and credentials are only ever live for the
 // duration of a single request.
 // Callers are responsible for calling db.Close() when the request is complete.
-func OpenWithTenantAndAccounting(cfg config.NexusConfig, tenantID, accountingURL string) (*DB, *accounting.Client, error) {
+func OpenWithTenantAndPortal(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *accounting.Client, error) {
 	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
@@ -248,8 +250,8 @@ func OpenWithTenantAndAccounting(cfg config.NexusConfig, tenantID, accountingURL
 	}
 
 	var acClient *accounting.Client
-	if accountingURL != "" {
-		acClient = accounting.NewClient(accountingURL, creds.Username, creds.Password)
+	if portalURL != "" {
+		acClient = accounting.NewClient(portalURL, creds.Username, creds.Password)
 	}
 
 	slog.Debug("Opened per-request tenant DB connection", "tenant_id", tenantID)
