@@ -277,13 +277,13 @@ func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage
 		w.Write([]byte("Cannot process: tenant not set"))
 		return nil, nil, false
 	}
-	db, acClient, err := storage.GetTenantResources(s.cfg.Nexus, tenantID, s.cfg.PortalURL)
+	db, pClient, err := storage.GetTenantResources(s.cfg.Nexus, tenantID, s.cfg.PortalURL)
 	if err != nil {
 		slog.Error("Failed to open tenant resources", "tenant_id", tenantID, "document_id", docID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
 		return nil, nil, false
 	}
-	return db, acClient, true
+	return db, pClient, true
 }
 
 // resolveTenantID fetches the document from Paperless and returns the value of
@@ -335,19 +335,19 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bill request", "doc_url", req.DocURL, "document_id", docID)
 
-	db, acClient, ok := s.openTenantResources(w, docID)
+	db, pClient, ok := s.openTenantResources(w, docID)
 	if !ok {
 		return
 	}
 
 	// Run processing asynchronously
-	go s.processBill(docID, req, db, acClient)
+	go s.processBill(docID, req, db, pClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Processing started"))
 }
 
-func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, acClient *portal.Client) {
+func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, pClient *portal.Client) {
 	defer db.Close()
 	slog.Info("Starting processing", "document_id", docID)
 
@@ -404,8 +404,8 @@ func (s *Server) processBill(docID int, req BillRequest, db *storage.DB, acClien
 	}
 
 	// 4b. Create Bill in Portal (optional)
-	if acClient != nil {
-		s.createLocalBill(docID, extracted, doc, req, acClient)
+	if pClient != nil {
+		s.createLocalBill(docID, extracted, doc, req, pClient)
 	}
 
 	// 5. Update Paperless
@@ -497,7 +497,7 @@ func (s *Server) getOrCreateCorrespondent(name string) (*paperless.Correspondent
 	return s.paperlessClient.CreateCorrespondent(name)
 }
 
-func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, acClient *portal.Client) {
+func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc *paperless.Document, req BillRequest, pClient *portal.Client) {
 	slog.Info("Creating local portal bill", "document_id", docID, "supplier", extracted.Supplier)
 
 	// Resolve vendor contact
@@ -506,7 +506,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		contactName = "Unknown Vendor"
 	}
 
-	contactID, err := acClient.GetOrCreateVendor(contactName)
+	contactID, err := pClient.GetOrCreateVendor(contactName)
 	if err != nil {
 		slog.Error("Portal contact error", "document_id", docID, "error", err)
 		return
@@ -549,7 +549,7 @@ func (s *Server) createLocalBill(docID int, extracted *docai.ExtractedData, doc 
 		Items:      buildBillLineItems(extracted.LineItems),
 	}
 
-	billID, err := acClient.CreateBill(billInput)
+	billID, err := pClient.CreateBill(billInput)
 	if err != nil {
 		slog.Error("Portal bill creation failed", "document_id", docID, "error", err)
 		return
@@ -720,18 +720,18 @@ func (s *Server) handlePayouts(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received payout request", "doc_url", req.DocURL, "document_id", docID)
 
-	db, acClient, ok := s.openTenantResources(w, docID)
+	db, pClient, ok := s.openTenantResources(w, docID)
 	if !ok {
 		return
 	}
 
-	go s.processPayout(docID, req, db, acClient)
+	go s.processPayout(docID, req, db, pClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Payout processing started"))
 }
 
-func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acClient *portal.Client) {
+func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, pClient *portal.Client) {
 	defer db.Close()
 	slog.Info("Starting payout processing", "document_id", docID)
 
@@ -877,7 +877,7 @@ func (s *Server) processPayout(docID int, req PayoutRequest, db *storage.DB, acC
 		slog.Debug("Extracted payout data from DB", "document_id", docID, "payout_input", payoutInput.String())
 
 		// 5. Send to Portal
-		payoutID, err := acClient.CreatePayout(payoutInput)
+		payoutID, err := pClient.CreatePayout(payoutInput)
 		if err != nil {
 			slog.Error("Portal payout creation failed", "document_id", docID, "error", err)
 			return
@@ -919,18 +919,18 @@ func (s *Server) handleBankStatements(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Received bank statement request", "doc_url", req.DocURL, "document_id", docID)
 
-	db, acClient, ok := s.openTenantResources(w, docID)
+	db, pClient, ok := s.openTenantResources(w, docID)
 	if !ok {
 		return
 	}
 
-	go s.processBankStatement(docID, req, db, acClient)
+	go s.processBankStatement(docID, req, db, pClient)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Bank statement processing started"))
 }
 
-func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB, acClient *portal.Client) {
+func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *storage.DB, pClient *portal.Client) {
 	defer db.Close()
 	slog.Info("Starting bank statement processing", "document_id", docID)
 
@@ -981,7 +981,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 	slog.Info("Extracted transactions", "document_id", docID, "count", len(transactions))
 
 	// 5. Send to Portal
-	if acClient != nil && len(transactions) > 0 {
+	if pClient != nil && len(transactions) > 0 {
 		// Resolve bank name from DocAI top-level entities (type = "bank_name")
 		bankName := "Bank"
 		for _, entity := range aiDoc.Entities {
@@ -998,7 +998,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 		}
 		slog.Info("Resolved bank name from DocAI", "bank_name", bankName)
 
-		bankAccountID, err := acClient.GetOrCreateBankAccount(bankName)
+		bankAccountID, err := pClient.GetOrCreateBankAccount(bankName)
 		if err != nil {
 			slog.Error("Failed to get/create bank account", "document_id", docID, "bank_name", bankName, "error", err)
 			// Continue without portal — don't abort
@@ -1026,7 +1026,7 @@ func (s *Server) processBankStatement(docID int, req BankStatementRequest, db *s
 					Description:     &desc,
 				}
 
-				txID, err := acClient.CreateTransaction(txnInput)
+				txID, err := pClient.CreateTransaction(txnInput)
 				if err != nil {
 					slog.Error("Failed to create transaction", "document_id", docID, "error", err, "date", date, "amount", amount, "type", txType)
 					continue
