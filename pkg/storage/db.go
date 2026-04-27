@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"paperless-document-processor/config"
@@ -66,6 +67,62 @@ type serviceAccount struct {
 
 // nexusHTTPClient is a shared HTTP client for nexus-control admin API calls.
 var nexusHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// serviceAccountCacheTTL is how long a cached service account entry remains
+// valid before it is considered stale and re-rotated on the next request.
+const serviceAccountCacheTTL = 5 * time.Minute
+
+// cachedServiceAccount pairs a set of credentials with the instant at which
+// the cache entry expires.
+type cachedServiceAccount struct {
+	creds     serviceAccount
+	expiresAt time.Time
+}
+
+// saCache is the in-memory, per-tenant service-account credential cache.
+type saCache struct {
+	mu      sync.RWMutex
+	entries map[string]cachedServiceAccount
+	ttl     time.Duration
+}
+
+// get returns the cached credentials for tenantID and true if a non-expired
+// entry exists, otherwise returns nil and false.
+func (c *saCache) get(tenantID string) (*serviceAccount, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[tenantID]
+	if !ok || !time.Now().Before(entry.expiresAt) {
+		return nil, false
+	}
+	sa := entry.creds
+	return &sa, true
+}
+
+// set stores creds for tenantID in the cache with the configured TTL.
+func (c *saCache) set(tenantID string, creds *serviceAccount) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[tenantID] = cachedServiceAccount{
+		creds:     *creds,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+}
+
+// invalidate removes the cache entry for tenantID so that the next call
+// triggers a fresh rotation.
+func (c *saCache) invalidate(tenantID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, tenantID)
+}
+
+// tenantSACache is the package-level service-account cache shared by all
+// callers of GetTenantResources.
+var tenantSACache = &saCache{
+	entries: make(map[string]cachedServiceAccount),
+	ttl:     serviceAccountCacheTTL,
+}
 
 // RotateTenantServiceAccount calls the nexus-control admin API to rotate the
 // service account for the given tenant, returning fresh credentials.
@@ -174,6 +231,8 @@ func MigrateAllTenants(cfg config.NexusConfig) error {
 			slog.Error("failed to rotate service account for migration", "tenant_id", t.ID, "error", err)
 			continue
 		}
+		tenantSACache.set(t.ID, creds)
+		slog.Debug("cached service account credentials during migration", "tenant_id", t.ID)
 
 		db, err := openRawDB(cfg, creds)
 		if err != nil {
@@ -225,18 +284,24 @@ func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
 	return db, err
 }
 
-// GetTenantResources rotates the service account for the given tenant
-// exactly once, opens a per-request DB connection with those credentials, and
-// (when portalURL is non-empty) also constructs a portal.Client using
-// the same rotated service_id / service_api_key as HTTP Basic Auth credentials.
-// This means the portal REST API and the Nexus gateway both use the same
-// per-tenant service account, and credentials are only ever live for the
-// duration of a single request.
+// GetTenantResources opens a per-request DB connection for the given tenant and
+// (when portalURL is non-empty) constructs a portal.Client with the same
+// credentials. Credentials are fetched from the in-memory cache when available;
+// otherwise they are obtained by rotating the service account via the
+// nexus-control admin API and then stored in the cache for future requests.
 // Callers are responsible for calling db.Close() when the request is complete.
 func GetTenantResources(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *portal.Client, error) {
-	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
+	creds, ok := tenantSACache.get(tenantID)
+	if !ok {
+		var err error
+		creds, err = RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)
+		}
+		tenantSACache.set(tenantID, creds)
+		slog.Debug("cached service account credentials", "tenant_id", tenantID)
+	} else {
+		slog.Debug("using cached service account credentials", "tenant_id", tenantID)
 	}
 
 	rawDB, err := openRawDB(cfg, creds)
