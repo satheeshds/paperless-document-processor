@@ -221,19 +221,19 @@ func openRawDB(cfg config.NexusConfig, creds *serviceAccount) (*sql.DB, error) {
 // It rotates the service account credentials and runs MigrateDB.
 // Callers are responsible for calling Close when the request is complete.
 func OpenWithTenant(cfg config.NexusConfig, tenantID string) (*DB, error) {
-	db, _, err := OpenWithTenantAndPortal(cfg, tenantID, "")
+	db, _, err := GetTenantResources(cfg, tenantID, "")
 	return db, err
 }
 
-// OpenWithTenantAndPortal rotates the service account for the given tenant
+// GetTenantResources rotates the service account for the given tenant
 // exactly once, opens a per-request DB connection with those credentials, and
-// (when portalURL is non-empty) also constructs an portal.Client using
+// (when portalURL is non-empty) also constructs a portal.Client using
 // the same rotated service_id / service_api_key as HTTP Basic Auth credentials.
 // This means the portal REST API and the Nexus gateway both use the same
 // per-tenant service account, and credentials are only ever live for the
 // duration of a single request.
 // Callers are responsible for calling db.Close() when the request is complete.
-func OpenWithTenantAndPortal(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *portal.Client, error) {
+func GetTenantResources(cfg config.NexusConfig, tenantID, portalURL string) (*DB, *portal.Client, error) {
 	creds, err := RotateTenantServiceAccount(cfg.ControlURL, cfg.AdminAPIKey, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to rotate service account for tenant %s: %w", tenantID, err)

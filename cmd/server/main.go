@@ -277,7 +277,7 @@ func (s *Server) openTenantResources(w http.ResponseWriter, docID int) (*storage
 		w.Write([]byte("Cannot process: tenant not set"))
 		return nil, nil, false
 	}
-	db, acClient, err := storage.OpenWithTenantAndPortal(s.cfg.Nexus, tenantID, s.cfg.PortalURL)
+	db, acClient, err := storage.GetTenantResources(s.cfg.Nexus, tenantID, s.cfg.PortalURL)
 	if err != nil {
 		slog.Error("Failed to open tenant resources", "tenant_id", tenantID, "document_id", docID, "error", err)
 		http.Error(w, "Failed to open tenant database", http.StatusInternalServerError)
