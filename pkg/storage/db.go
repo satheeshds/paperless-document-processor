@@ -387,13 +387,17 @@ func (d *DB) SaveDocument(doc *ProcessedDocument) error {
 }
 
 func (d *DB) IsDocumentProcessed(docID int) (bool, error) {
-	query := `SELECT COUNT(1) FROM processed_documents WHERE paperless_id = $1;`
+	query := `SELECT 1 FROM processed_documents WHERE paperless_id = $1 LIMIT 1`
 	slog.Debug("Executing check statement", "query", query, "docID", docID)
-	var count int
-	if err := d.Conn.QueryRow(query, docID).Scan(&count); err != nil {
+	var exists int
+	err := d.Conn.QueryRow(query, docID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
 		return false, fmt.Errorf("failed to check document: %w", err)
 	}
-	return count > 0, nil
+	return true, nil
 }
 
 func (d *DB) Close() error {
