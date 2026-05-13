@@ -140,13 +140,14 @@ type PlatformConfig struct {
 }
 
 type ImportConfig struct {
-	TableName     string        `json:"table_name,omitempty"`
-	Sheet         string        `json:"sheet,omitempty"`
-	Range         string        `json:"range,omitempty"`
-	RelativeRange RelativeRange `json:"relative_range,omitempty"`
-	Header        *bool         `json:"header,omitempty"`
-	StopAtEmpty   *bool         `json:"stop_at_empty,omitempty"`
-	AllVarchar    *bool         `json:"all_varchar,omitempty"`
+	TableName      string        `json:"table_name,omitempty"`
+	Sheet          string        `json:"sheet,omitempty"`
+	Range          string        `json:"range,omitempty"`
+	RelativeRange  RelativeRange `json:"relative_range,omitempty"`
+	Header         *bool         `json:"header,omitempty"`
+	StopAtEmpty    *bool         `json:"stop_at_empty,omitempty"`
+	AllVarchar     *bool         `json:"all_varchar,omitempty"`
+	EmptyAsVarchar *bool         `json:"empty_as_varchar,omitempty"`
 	// Footer indicates that the last row returned by the service is a totals /
 	// summary footer row that should be excluded from the loaded data.  When
 	// true, the final row of each parsed result is dropped before it is
@@ -187,6 +188,9 @@ func (p ImportConfig) ToOptionString() string {
 	}
 	if p.Sheet != "" {
 		options += fmt.Sprintf("sheet='%s',", p.Sheet)
+	}
+	if p.EmptyAsVarchar != nil {
+		options += fmt.Sprintf("empty_as_varchar=%t,", *p.EmptyAsVarchar)
 	}
 	if p.Range != "" {
 		options += fmt.Sprintf("range='%s'", p.Range)
