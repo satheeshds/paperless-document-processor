@@ -631,6 +631,51 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 		return fmt.Errorf("LoadRowsIntoTable: failed to create table %s: %w", tableName, err)
 	}
 
+	// Reconcile schema for existing tables: CREATE TABLE IF NOT EXISTS does not
+	// add columns when the table already exists, but inserts below always target
+	// the current column set.
+	existingCols := make(map[string]struct{}, len(columns)+1)
+	columnQuery := `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name = $1
+	`
+	rows, err := d.Conn.Query(columnQuery, tableName)
+	if err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to query existing columns for %s: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to scan existing column for %s: %w", tableName, err)
+		}
+		existingCols[columnName] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to read existing columns for %s: %w", tableName, err)
+	}
+
+	if _, ok := existingCols["document_id"]; !ok {
+		alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s INTEGER;", safeTableName, pgx.Identifier{"document_id"}.Sanitize())
+		slog.Debug("LoadRowsIntoTable: alter table add column", "query", alterStmt)
+		if _, err := d.Conn.Exec(alterStmt); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to add document_id column to %s: %w", tableName, err)
+		}
+	}
+	for _, c := range columns {
+		if _, ok := existingCols[c]; ok {
+			continue
+		}
+		alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s TEXT;", safeTableName, pgx.Identifier{c}.Sanitize())
+		slog.Debug("LoadRowsIntoTable: alter table add column", "query", alterStmt)
+		if _, err := d.Conn.Exec(alterStmt); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to add column %s to %s: %w", c, tableName, err)
+		}
+	}
+
 	if len(result.Rows) == 0 {
 		slog.Warn("LoadRowsIntoTable: no rows to insert", "table", tableName, "docID", docID)
 		return nil
