@@ -94,3 +94,9 @@ Configure a **Webhook** in Paperless-ngx to trigger this service when a document
 - **Trigger**: Document Added
 - **URL**: `http://<machine-ip>:8080/webhook`
 - **Method**: POST
+
+## Training pipeline architecture (ID-35)
+
+For the training data flow (Paperless → GCS → Document AI), see [docs/training-pipeline.md](docs/training-pipeline.md). It now includes:
+- **Current simple path**: directly upload each Paperless document to a dated folder in a GCS bucket.
+- **Scalable path**: Pub/Sub-based ingestion, Cloud Run/Functions import, Dataset API, and scheduled training/promotion.
