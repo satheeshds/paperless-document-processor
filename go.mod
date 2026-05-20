@@ -1,12 +1,12 @@
 module paperless-document-processor
 
-go 1.24.4
+go 1.25.0
 
 require (
 	cloud.google.com/go/documentai v1.40.0
 	github.com/gabriel-vasile/mimetype v1.4.13
 	github.com/go-viper/mapstructure/v2 v2.4.0
-	github.com/jackc/pgx/v5 v5.7.4
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/joho/godotenv v1.5.1
 	github.com/pressly/goose/v3 v3.24.3
 	google.golang.org/api v0.265.0
