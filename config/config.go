@@ -148,6 +148,7 @@ type ImportConfig struct {
 	StopAtEmpty    *bool         `json:"stop_at_empty,omitempty"`
 	AllVarchar     *bool         `json:"all_varchar,omitempty"`
 	EmptyAsVarchar *bool         `json:"empty_as_varchar,omitempty"`
+	IgnoreErrors   *bool         `json:"ignore_errors,omitempty"`
 	// Footer indicates that the last row returned by the service is a totals /
 	// summary footer row that should be excluded from the loaded data.  When
 	// true, the final row of each parsed result is dropped before it is
@@ -191,6 +192,9 @@ func (p ImportConfig) ToOptionString() string {
 	}
 	if p.EmptyAsVarchar != nil {
 		options += fmt.Sprintf("empty_as_varchar=%t,", *p.EmptyAsVarchar)
+	}
+	if p.IgnoreErrors != nil {
+		options += fmt.Sprintf("ignore_errors=%t,", *p.IgnoreErrors)
 	}
 	if p.Range != "" {
 		options += fmt.Sprintf("range='%s'", p.Range)
