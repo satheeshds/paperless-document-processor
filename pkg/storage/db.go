@@ -683,58 +683,57 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 
 	insertCols := make([]string, 0, len(columns)+1)
 	insertCols = append(insertCols, pgx.Identifier{"document_id"}.Sanitize())
-	ph := make([]string, 0, len(columns)+1)
-	ph = append(ph, "$1")
-	for i, c := range columns {
+	for _, c := range columns {
 		insertCols = append(insertCols, pgx.Identifier{c}.Sanitize())
-		ph = append(ph, fmt.Sprintf("$%d", i+2))
 	}
-	insertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", safeTableName, strings.Join(insertCols, ", "), strings.Join(ph, ", "))
+	const batchSize = 100
+	valueCountPerRow := len(columns) + 1
 
-	ctx := context.Background()
-	conn, err := d.Conn.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("LoadRowsIntoTable: failed to reserve insert connection: %w", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
-		return fmt.Errorf("LoadRowsIntoTable: failed to begin insert transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
+	for start := 0; start < len(result.Rows); start += batchSize {
+		end := start + batchSize
+		if end > len(result.Rows) {
+			end = len(result.Rows)
 		}
-		if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
-			slog.Error("LoadRowsIntoTable: rollback failed", "table", tableName, "docID", docID, "error", rbErr)
-		}
-	}()
+		batchRows := result.Rows[start:end]
 
-	for _, row := range result.Rows {
-		args := make([]interface{}, len(columns)+1)
-		args[0] = docID
-		for i, c := range columns {
-			v, ok := row[c]
-			if !ok || v == nil {
-				args[i+1] = nil
-				continue
+		args := make([]interface{}, 0, len(batchRows)*valueCountPerRow)
+		valuePlaceholders := make([]string, 0, len(batchRows))
+		argPos := 1
+
+		for _, row := range batchRows {
+			rowPlaceholders := make([]string, 0, valueCountPerRow)
+			rowPlaceholders = append(rowPlaceholders, fmt.Sprintf("$%d", argPos))
+			args = append(args, docID)
+			argPos++
+
+			for _, c := range columns {
+				rowPlaceholders = append(rowPlaceholders, fmt.Sprintf("$%d", argPos))
+				v, ok := row[c]
+				if !ok || v == nil {
+					args = append(args, nil)
+				} else {
+					switch vv := v.(type) {
+					case string:
+						args = append(args, vv)
+					default:
+						args = append(args, fmt.Sprint(vv))
+					}
+				}
+				argPos++
 			}
-			switch vv := v.(type) {
-			case string:
-				args[i+1] = vv
-			default:
-				args[i+1] = fmt.Sprint(vv)
-			}
+			valuePlaceholders = append(valuePlaceholders, fmt.Sprintf("(%s)", strings.Join(rowPlaceholders, ", ")))
 		}
-		if _, err := conn.ExecContext(ctx, insertStmt, args...); err != nil {
-			return fmt.Errorf("LoadRowsIntoTable: failed to insert row: %w", err)
+
+		insertStmt := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES %s;",
+			safeTableName,
+			strings.Join(insertCols, ", "),
+			strings.Join(valuePlaceholders, ", "),
+		)
+		if _, err := d.Conn.Exec(insertStmt, args...); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to insert row batch starting at index %d: %w", start, err)
 		}
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("LoadRowsIntoTable: failed to commit insert transaction: %w", err)
-	}
-	committed = true
 
 	slog.Info("LoadRowsIntoTable: loaded rows", "table", tableName, "count", len(result.Rows))
 	return nil
