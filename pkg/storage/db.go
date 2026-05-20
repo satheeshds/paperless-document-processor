@@ -12,14 +12,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"paperless-document-processor/config"
-	"paperless-document-processor/pkg/portal"
 	"paperless-document-processor/pkg/excel"
 	"paperless-document-processor/pkg/libreoffice"
+	"paperless-document-processor/pkg/portal"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/jackc/pgx/v5"
@@ -587,75 +587,151 @@ func marshalOrderedRows(rows []map[string]interface{}, headers []string) ([]byte
 // All column types are inferred by DuckDB from the JSON data.  Export-config
 // expressions should use TRY_CAST for numeric conversions where needed.
 func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.ParseResult) error {
-	if result == nil || len(result.Rows) == 0 {
-		slog.Warn("LoadRowsIntoTable: no rows to load", "table", tableName, "docID", docID)
+	if result == nil {
+		slog.Warn("LoadRowsIntoTable: no result", "table", tableName, "docID", docID)
 		return nil
 	}
 
-	// Serialize rows to a temporary JSON file so DuckDB can read them via
-	// read_json_auto — identical approach to how the Nexus path uses read_xlsx.
-	// Use marshalOrderedRows when headers are available so that read_json_auto
-	// creates DuckDB table columns in the original xlsx column sequence.
-	var jsonBytes []byte
-	var err error
+	columns := make([]string, 0, len(result.Headers))
 	if len(result.Headers) > 0 {
-		jsonBytes, err = marshalOrderedRows(result.Rows, result.Headers)
+		columns = append(columns, result.Headers...)
 	} else {
-		jsonBytes, err = json.Marshal(result.Rows)
+		seen := make(map[string]struct{})
+		for _, row := range result.Rows {
+			for k := range row {
+				if _, ok := seen[k]; ok {
+					continue
+				}
+				seen[k] = struct{}{}
+				columns = append(columns, k)
+			}
+		}
+		sort.Strings(columns)
 	}
-	if err != nil {
-		return fmt.Errorf("LoadRowsIntoTable: failed to marshal rows to JSON: %w", err)
+	if len(columns) == 0 {
+		slog.Warn("LoadRowsIntoTable: rows contain no columns", "table", tableName, "docID", docID)
+		return nil
 	}
 
-	tmpFile, err := os.CreateTemp("", "lo-rows-*.json")
-	if err != nil {
-		return fmt.Errorf("LoadRowsIntoTable: failed to create temp JSON file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(jsonBytes); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("LoadRowsIntoTable: failed to write JSON: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("LoadRowsIntoTable: failed to close temp JSON file: %w", err)
-	}
-	defer os.Remove(tmpPath)
-
-	// Escape single quotes in the path for safe SQL embedding (os.CreateTemp
-	// produces safe names, but belt-and-suspenders for portability).
-	safePath := strings.ReplaceAll(tmpPath, "'", "''")
 	safeTableName := pgx.Identifier{tableName}.Sanitize()
 
-	// 1. Create table schema (LIMIT 0 = structure only, no rows) using
-	//    read_json_auto — mirrors the read_xlsx CREATE TABLE pattern.
-	createStmt := fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s AS SELECT %d AS document_id, * FROM read_json_auto('%s') LIMIT 0;`,
-		safeTableName, docID, safePath,
-	)
+	createCols := make([]string, 0, len(columns)+1)
+	createCols = append(createCols, "document_id INTEGER")
+	for _, c := range columns {
+		createCols = append(createCols, fmt.Sprintf("%s TEXT", pgx.Identifier{c}.Sanitize()))
+	}
+
+	// Create table with explicit TEXT columns — no file access required.
+	// Run directly on d.Conn without a transaction: the Nexus gateway rejects
+	// the keepalive ping that database/sql sends on Begin(), causing the first
+	// statement after Begin() to fail with "empty query".
+	createStmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s);", safeTableName, strings.Join(createCols, ", "))
 	slog.Debug("LoadRowsIntoTable: create table", "query", createStmt)
 	if _, err := d.Conn.Exec(createStmt); err != nil {
 		return fmt.Errorf("LoadRowsIntoTable: failed to create table %s: %w", tableName, err)
 	}
 
-	// 2. Bulk-insert all rows in a single statement.  BY NAME maps JSON columns
-	//    to table columns by name so additional/missing columns don't cause errors.
-	insertStmt := fmt.Sprintf(
-		`INSERT INTO %s BY NAME SELECT %d AS document_id, * FROM read_json_auto('%s');`,
-		safeTableName, docID, safePath,
-	)
-	slog.Debug("LoadRowsIntoTable: insert", "query", insertStmt)
-	if _, err := d.Conn.Exec(insertStmt); err != nil {
-		// Fallback without BY NAME for older DuckDB versions.
-		slog.Warn("LoadRowsIntoTable: BY NAME insert failed, retrying without BY NAME", "err", err)
-		fallbackStmt := fmt.Sprintf(
-			`INSERT INTO %s SELECT %d AS document_id, * FROM read_json_auto('%s');`,
-			safeTableName, docID, safePath,
+	// Reconcile schema for existing tables: CREATE TABLE IF NOT EXISTS does not
+	// add columns when the table already exists, but inserts below always target
+	// the current column set.
+	existingCols := make(map[string]struct{}, len(columns)+1)
+	columnQuery := `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name = $1
+	`
+	rows, err := d.Conn.Query(columnQuery, tableName)
+	if err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to query existing columns for %s: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to scan existing column for %s: %w", tableName, err)
+		}
+		existingCols[columnName] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to read existing columns for %s: %w", tableName, err)
+	}
+
+	if _, ok := existingCols["document_id"]; !ok {
+		alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s INTEGER;", safeTableName, pgx.Identifier{"document_id"}.Sanitize())
+		slog.Debug("LoadRowsIntoTable: alter table add column", "query", alterStmt)
+		if _, err := d.Conn.Exec(alterStmt); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to add document_id column to %s: %w", tableName, err)
+		}
+	}
+	for _, c := range columns {
+		if _, ok := existingCols[c]; ok {
+			continue
+		}
+		alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s TEXT;", safeTableName, pgx.Identifier{c}.Sanitize())
+		slog.Debug("LoadRowsIntoTable: alter table add column", "query", alterStmt)
+		if _, err := d.Conn.Exec(alterStmt); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to add column %s to %s: %w", c, tableName, err)
+		}
+	}
+
+	if len(result.Rows) == 0 {
+		slog.Warn("LoadRowsIntoTable: no rows to insert", "table", tableName, "docID", docID)
+		return nil
+	}
+
+	insertCols := make([]string, 0, len(columns)+1)
+	insertCols = append(insertCols, pgx.Identifier{"document_id"}.Sanitize())
+	for _, c := range columns {
+		insertCols = append(insertCols, pgx.Identifier{c}.Sanitize())
+	}
+	const batchSize = 100
+	valueCountPerRow := len(columns) + 1
+
+	for start := 0; start < len(result.Rows); start += batchSize {
+		end := start + batchSize
+		if end > len(result.Rows) {
+			end = len(result.Rows)
+		}
+		batchRows := result.Rows[start:end]
+
+		args := make([]interface{}, 0, len(batchRows)*valueCountPerRow)
+		valuePlaceholders := make([]string, 0, len(batchRows))
+		argPos := 1
+
+		for _, row := range batchRows {
+			rowPlaceholders := make([]string, 0, valueCountPerRow)
+			rowPlaceholders = append(rowPlaceholders, fmt.Sprintf("$%d", argPos))
+			args = append(args, docID)
+			argPos++
+
+			for _, c := range columns {
+				rowPlaceholders = append(rowPlaceholders, fmt.Sprintf("$%d", argPos))
+				v, ok := row[c]
+				if !ok || v == nil {
+					args = append(args, nil)
+				} else {
+					switch vv := v.(type) {
+					case string:
+						args = append(args, vv)
+					default:
+						args = append(args, fmt.Sprint(vv))
+					}
+				}
+				argPos++
+			}
+			valuePlaceholders = append(valuePlaceholders, fmt.Sprintf("(%s)", strings.Join(rowPlaceholders, ", ")))
+		}
+
+		insertStmt := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES %s;",
+			safeTableName,
+			strings.Join(insertCols, ", "),
+			strings.Join(valuePlaceholders, ", "),
 		)
-		if _, err2 := d.Conn.Exec(fallbackStmt); err2 != nil {
-			return fmt.Errorf("LoadRowsIntoTable: failed to insert JSON data: %w (fallback: %v)", err, err2)
+		if _, err := d.Conn.Exec(insertStmt, args...); err != nil {
+			return fmt.Errorf("LoadRowsIntoTable: failed to insert row batch starting at index %d: %w", start, err)
 		}
 	}
 
