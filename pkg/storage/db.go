@@ -691,7 +691,14 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	}
 	insertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", safeTableName, strings.Join(insertCols, ", "), strings.Join(ph, ", "))
 
-	if _, err := d.Conn.Exec("BEGIN"); err != nil {
+	ctx := context.Background()
+	conn, err := d.Conn.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to reserve insert connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
 		return fmt.Errorf("LoadRowsIntoTable: failed to begin insert transaction: %w", err)
 	}
 	committed := false
@@ -699,7 +706,7 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 		if committed {
 			return
 		}
-		if _, rbErr := d.Conn.Exec("ROLLBACK"); rbErr != nil {
+		if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
 			slog.Error("LoadRowsIntoTable: rollback failed", "table", tableName, "docID", docID, "error", rbErr)
 		}
 	}()
@@ -720,11 +727,11 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 				args[i+1] = fmt.Sprint(vv)
 			}
 		}
-		if _, err := d.Conn.Exec(insertStmt, args...); err != nil {
+		if _, err := conn.ExecContext(ctx, insertStmt, args...); err != nil {
 			return fmt.Errorf("LoadRowsIntoTable: failed to insert row: %w", err)
 		}
 	}
-	if _, err := d.Conn.Exec("COMMIT"); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("LoadRowsIntoTable: failed to commit insert transaction: %w", err)
 	}
 	committed = true
