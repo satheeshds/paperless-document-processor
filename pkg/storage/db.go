@@ -691,6 +691,19 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 	}
 	insertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", safeTableName, strings.Join(insertCols, ", "), strings.Join(ph, ", "))
 
+	if _, err := d.Conn.Exec("BEGIN"); err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to begin insert transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if _, rbErr := d.Conn.Exec("ROLLBACK"); rbErr != nil {
+			slog.Error("LoadRowsIntoTable: rollback failed", "table", tableName, "docID", docID, "error", rbErr)
+		}
+	}()
+
 	for _, row := range result.Rows {
 		args := make([]interface{}, len(columns)+1)
 		args[0] = docID
@@ -711,6 +724,10 @@ func (d *DB) LoadRowsIntoTable(docID int, tableName string, result *libreoffice.
 			return fmt.Errorf("LoadRowsIntoTable: failed to insert row: %w", err)
 		}
 	}
+	if _, err := d.Conn.Exec("COMMIT"); err != nil {
+		return fmt.Errorf("LoadRowsIntoTable: failed to commit insert transaction: %w", err)
+	}
+	committed = true
 
 	slog.Info("LoadRowsIntoTable: loaded rows", "table", tableName, "count", len(result.Rows))
 	return nil
