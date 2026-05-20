@@ -94,3 +94,11 @@ Configure a **Webhook** in Paperless-ngx to trigger this service when a document
 - **Trigger**: Document Added
 - **URL**: `http://<machine-ip>:8080/webhook`
 - **Method**: POST
+
+## Research: Parquet Format (ID-34)
+
+- **Purpose**: Parquet is an open, columnar file format optimized for analytical workloads. It organizes data by column instead of row, enabling efficient column projection, strong compression/encoding, and predicate pushdown. The result is lower storage footprint and faster scans for reporting/analytics use cases.
+- **Multi-tenancy considerations**: Parquet itself is just a storage format—it does not enforce tenant isolation or access control. It can help indirectly by allowing you to **partition** data by tenant (e.g., `tenant_id=...` folders) to prune I/O, and by reducing storage costs for per-tenant historical data. You still need external controls (separate buckets, databases, ACLs, or row-level security in the query engine). If tenant isolation is a requirement, combine Parquet with:
+  - Partitioning or separate files/buckets per tenant.
+  - Access policies at the storage layer or query engine (e.g., DuckDB/Trino/Snowflake row filters).
+  - Optional Parquet encryption or envelope encryption of objects if regulatory boundaries demand it.
